@@ -672,14 +672,19 @@ impl Archetype {
         component_indices: NonNull<[ComponentIdx]>,
         components: &mut Components,
     ) -> Self {
+        // Create a column for each component and register this archetype in the
+        // component infos.
         let columns: Box<[Column]> = component_indices
             .as_ref()
             .iter()
             .map(|&idx| {
+                // SAFETY: Caller guaranteed the component indices are valid.
                 let info = unsafe { components.get_by_index_mut(idx).unwrap_unchecked() };
 
+                // Register this archetype.
                 info.member_of.insert(arch_idx);
 
+                // Construct the column.
                 Column {
                     component_layout: info.layout(),
                     data: NonNull::dangling(),
@@ -706,10 +711,13 @@ impl Archetype {
     /// Registers a targeted event handler for this archetype.
     fn register_handler(&mut self, info: &mut HandlerInfo) {
         // TODO: Self::has_component method
+        
+        // Tell the handler about this archetype and future updates to it.
         if info
             .archetype_filter()
             .matches_archetype(|idx| self.column_of(idx).is_some())
         {
+            // Don't call `refresh_archetype` if this archetype is empty.
             if self.entity_count() > 0 {
                 info.handler_mut().refresh_archetype(self);
             }
@@ -717,11 +725,15 @@ impl Archetype {
             self.refresh_listeners.insert(info.ptr());
         }
 
+        // If the handler is targeted, and its component access matches this
+        // archetype, insert it into our handler list for the event index.
         if let (Some(expr), EventId::Targeted(event_id)) = (
             info.targeted_event_component_access(),
             info.received_event(),
         ) {
             if expr.matches_archetype(|idx| self.column_of(idx).is_some()) {
+                // Insert the handler into the existing list if present, or
+                // make a new list and insert the handler into that.
                 if let Some(list) = self.event_listeners.get_mut(event_id.index()) {
                     list.insert(info.ptr(), info.priority());
                 } else {
@@ -814,6 +826,8 @@ impl Archetype {
             return false;
         }
 
+        /// Scope guard that aborts the process when a panic is triggered while
+        /// it is in scope.
         struct AbortOnPanic;
 
         impl Drop for AbortOnPanic {
@@ -835,7 +849,7 @@ impl Archetype {
                 continue;
             }
 
-            // Non-zero: checked product of two non-zero values
+            // Non-zero: checked product of two non-zero values.
             let Some(new_cap_in_bytes) = new_cap.checked_mul(col.component_layout.size()) else {
                 capacity_overflow()
             };
@@ -873,6 +887,7 @@ impl Archetype {
             }
         }
 
+        // Forget the scope guard to avoid a spurious panic.
         mem::forget(guard);
 
         true
