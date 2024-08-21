@@ -934,11 +934,19 @@ pub struct Column {
 
 impl Column {
     /// Returns a pointer to the beginning of the buffer holding the component
-    /// data, or a dangling pointer if the the buffer is empty.
+    /// data, or a dangling pointer if the buffer is empty.
     pub fn data(&self) -> NonNull<u8> {
         self.data
     }
 
+    /// Overwrites the element at `idx` with the data at `elem`, which this
+    /// method takes ownership of.
+    ///
+    /// # Safety
+    ///
+    /// - `idx` must be in bounds
+    /// - `elem` must point to a component of the correct type
+    /// - `elem` must not alias `&mut self`
     unsafe fn assign(&mut self, idx: usize, elem: *const u8) {
         let ptr = self.data.as_ptr().add(idx * self.component_layout.size());
 
@@ -949,6 +957,13 @@ impl Column {
         ptr::copy_nonoverlapping(elem, ptr, self.component_layout.size());
     }
 
+    /// Removes the element at `idx` and immediately moves the last element (at
+    /// index `len - 1`) into the empty space.
+    ///
+    /// # Safety
+    ///
+    /// - `idx` must be in bounds
+    /// - `len` must be correct
     unsafe fn swap_remove(&mut self, len: usize, idx: usize) {
         debug_assert!(idx < len, "index out of bounds");
 
@@ -968,6 +983,13 @@ impl Column {
         }
     }
 
+    /// Moves the last element (at index `len - 1`) to `idx`, without dropping
+    /// the element at `idx`.
+    ///
+    /// # Safety
+    ///
+    /// - `idx` must be in bounds
+    /// - `len` must be correct
     unsafe fn swap_remove_no_drop(&mut self, len: usize, idx: usize) {
         debug_assert!(idx < len, "index out of bounds");
 
@@ -983,6 +1005,12 @@ impl Column {
         }
     }
 
+    /// Moves the element at `src_idx` from `other` to `self`.
+    /// 
+    /// # Safety
+    /// 
+    /// - `self_len` and `other_len` must be correct
+    /// - `src_idx` must be in bounds
     unsafe fn transfer_elem(
         &mut self,
         self_len: usize,
