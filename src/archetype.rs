@@ -646,6 +646,7 @@ pub struct Archetype {
 }
 
 impl Archetype {
+    /// Constructs an empty archetype.
     fn empty() -> Self {
         Self {
             index: ArchetypeIdx::EMPTY,
@@ -659,6 +660,8 @@ impl Archetype {
         }
     }
 
+    /// Constructs a new archetype.
+    /// 
     /// # Safety
     ///
     /// - Component indices slice must be in sorted order.
@@ -700,7 +703,9 @@ impl Archetype {
         }
     }
 
+    /// Registers a targeted event handler for this archetype.
     fn register_handler(&mut self, info: &mut HandlerInfo) {
+        // TODO: Self::has_component method
         if info
             .archetype_filter()
             .matches_archetype(|idx| self.column_of(idx).is_some())
@@ -729,6 +734,8 @@ impl Archetype {
         }
     }
 
+    /// Returns the list of targeted event listeners for this archetype and
+    /// event index.
     pub(crate) fn handler_list_for(&self, idx: TargetedEventIdx) -> Option<&HandlerList> {
         self.event_listeners.get(idx)
     }
@@ -788,10 +795,13 @@ impl Archetype {
     /// Reserve space for at least one additional entity in this archetype. Has
     /// no effect if there is already sufficient capacity. Returns a boolean
     /// indicating if a reallocation occurred.
+    // TODO: Does not actually need to be marked unsafe: does not depend on
+    //  guarantees made by caller.
     unsafe fn reserve_one(&mut self) -> bool {
         let old_cap = self.entity_ids.capacity();
         // Piggyback off the entity ID Vec's len and cap.
         self.entity_ids.reserve(1);
+        // Non-zero because we just reserved space for one element.
         let new_cap = self.entity_ids.capacity();
 
         #[cold]
@@ -825,6 +835,7 @@ impl Archetype {
                 continue;
             }
 
+            // Non-zero: checked product of two non-zero values
             let Some(new_cap_in_bytes) = new_cap.checked_mul(col.component_layout.size()) else {
                 capacity_overflow()
             };
@@ -833,18 +844,26 @@ impl Archetype {
                 capacity_overflow()
             }
 
+            // SAFETY: Alignment requirements checked when
+            // `col.component_layout` was constructed. Size requirements were
+            // just checked (under the assumption that the size is a multiple of
+            // the alignment).
             let new_cap_layout =
                 Layout::from_size_align_unchecked(new_cap_in_bytes, col.component_layout.align());
 
             let ptr = if old_cap == 0 {
+                // SAFETY: We checked size > 0 above.
                 alloc(new_cap_layout)
             } else {
-                // Previous layout must have been valid.
+                // SAFETY: Previous layout must have been valid.
                 let old_cap_layout = Layout::from_size_align_unchecked(
                     old_cap * col.component_layout.size(),
                     col.component_layout.align(),
                 );
 
+                // SAFETY: `old_cap_layout` is the layout used for the last
+                // allocation, from which `col.data.as_ptr()` was returned.
+                // `new_cap_in_bytes` was checked to be in bounds (see above).
                 realloc(col.data.as_ptr(), old_cap_layout, new_cap_in_bytes)
             };
 
@@ -1006,9 +1025,9 @@ impl Column {
     }
 
     /// Moves the element at `src_idx` from `other` to `self`.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// - `self_len` and `other_len` must be correct
     /// - `src_idx` must be in bounds
     unsafe fn transfer_elem(
