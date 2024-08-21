@@ -967,12 +967,16 @@ impl Column {
     /// - `elem` must point to a component of the correct type
     /// - `elem` must not alias `&mut self`
     unsafe fn assign(&mut self, idx: usize, elem: *const u8) {
+        // Obtain raw pointer to the overwritten element using pointer
+        // arithmetic. SAFETY: Caller guaranteed `idx` is in bounds.
         let ptr = self.data.as_ptr().add(idx * self.component_layout.size());
 
+        // Call drop function on the overwritten element, if it exists.
         if let Some(drop) = self.drop {
             drop(NonNull::new_unchecked(ptr));
         }
 
+        // Copy the passed element into the buffer to overwrite the old element.
         ptr::copy_nonoverlapping(elem, ptr, self.component_layout.size());
     }
 
@@ -986,17 +990,26 @@ impl Column {
     unsafe fn swap_remove(&mut self, len: usize, idx: usize) {
         debug_assert!(idx < len, "index out of bounds");
 
+        // Obtain raw pointer to the last element using pointer arithmetic. 
+        // SAFETY: Caller guaranteed `len` is correct, meaning `len - 1` is in
+        // bounds.
         let src = self
             .data
             .as_ptr()
             .add(self.component_layout.size() * (len - 1));
 
+        // Obtain raw pointer to the removed element using pointer arithmetic.
+        // SAFETY: Caller guaranteed `idx` is in bounds.
         let dst = self.data.as_ptr().add(self.component_layout.size() * idx);
 
+        // Call drop function on the overwritten element, if it exists.
         if let Some(drop) = self.drop {
             drop(NonNull::new_unchecked(dst));
         }
-
+        
+        // Copy the last element into the buffer to overwrite the removed
+        // element, unless the two elements are equal. This means that the last
+        // element of the column was removed, and nothing more needs to be done.
         if src != dst {
             ptr::copy_nonoverlapping(src, dst, self.component_layout.size());
         }
@@ -1012,24 +1025,34 @@ impl Column {
     unsafe fn swap_remove_no_drop(&mut self, len: usize, idx: usize) {
         debug_assert!(idx < len, "index out of bounds");
 
+        // Obtain raw pointer to the last element using pointer arithmetic. 
+        // SAFETY: Caller guaranteed `len` is correct, meaning `len - 1` is in
+        // bounds.
         let src = self
             .data
             .as_ptr()
             .add(self.component_layout.size() * (len - 1));
 
+        // Obtain raw pointer to the removed element using pointer arithmetic.
+        // SAFETY: Caller guaranteed `idx` is in bounds.
         let dst = self.data.as_ptr().add(self.component_layout.size() * idx);
 
+        // Copy the last element into the buffer to overwrite the removed
+        // element, unless the two elements are equal. This means that the last
+        // element of the column was removed, and nothing more needs to be done.
         if src != dst {
             ptr::copy_nonoverlapping(src, dst, self.component_layout.size());
         }
     }
 
-    /// Moves the element at `src_idx` from `other` to `self`.
+    /// Moves the element at `src_idx` from `self` to `other`.
     ///
     /// # Safety
     ///
     /// - `self_len` and `other_len` must be correct
-    /// - `src_idx` must be in bounds
+    /// - `src_idx` must be in bounds of `self`
+    /// - `other` must have space allocated for the element to be moved to index
+    ///   `other_len`
     unsafe fn transfer_elem(
         &mut self,
         self_len: usize,
@@ -1043,17 +1066,26 @@ impl Column {
         );
         debug_assert!(src_idx < self_len, "index out of bounds");
 
+        // Obtain raw pointer to the moved element using pointer arithmetic.
+        // SAFETY: Caller guaranteed `src_idx` is in bounds.
         let src = self
             .data
             .as_ptr()
             .add(src_idx * self.component_layout.size());
 
+        // Obtain raw pointer to the move destination using pointer arithmetic.
+        // SAFETY: Caller guaranteed `other_len` is part of `other`'s 
+        // allocation.
         let dst = other
             .data
             .as_ptr()
             .add(other_len * other.component_layout.size());
 
+        // Copy the element.
         ptr::copy_nonoverlapping(src, dst, self.component_layout.size());
+        
+        // Remove the moved element from our buffer without dropping it, because
+        // it is now owned by `other`.
         self.swap_remove_no_drop(self_len, src_idx);
     }
 }
