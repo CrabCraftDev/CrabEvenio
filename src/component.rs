@@ -112,7 +112,7 @@ impl Components {
 
     /// Tries to remove a component by its id. Returns the component info of the
     /// removed component, or `None` if the id was invalid and no component was
-    /// removed. 
+    /// removed.
     pub(crate) fn remove(&mut self, component_id: ComponentId) -> Option<ComponentInfo> {
         let info = self.infos.remove(component_id.0)?;
 
