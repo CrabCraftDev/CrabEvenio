@@ -51,9 +51,9 @@ impl Components {
     }
 
     /// Tries to add a component with the given descriptor. If the descriptor
-    /// has a type id and a component with that type id already exists, return
+    /// has a type id and a component with that type id already exists, returns
     /// its id and `false`. Otherwise, add a component with the given descriptor
-    /// and return its id and `true`.
+    /// and returns its id and `true`.
     // TODO: Should this be marked unsafe and have the same safety requirements
     //  as its caller, `World::add_component_with_descriptor`?
     pub(crate) fn add(&mut self, desc: ComponentDescriptor) -> (ComponentId, bool) {

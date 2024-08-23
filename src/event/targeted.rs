@@ -77,9 +77,9 @@ impl TargetedEvents {
     }
 
     /// Tries to add an event with the given descriptor. If the descriptor has a
-    /// type id and an event with that type id already exists, return its id and
-    /// `false`. Otherwise, add an event with the given descriptor and return
-    /// its id and `true`.
+    /// type id and an event with that type id already exists, returns its id
+    /// and `false`. Otherwise, add an event with the given descriptor and
+    /// returns its id and `true`.
     // TODO: Should this be marked unsafe and have the same safety requirements
     //  as its caller, `World::add_targeted_event_with_descriptor`?
     pub(crate) fn add(&mut self, desc: EventDescriptor) -> (TargetedEventId, bool) {
