@@ -730,7 +730,7 @@ impl<'a, Q: Query> Iterator for Iter<'a, Q> {
             // Move on to the next archetype.
             self.state = unsafe { NonNull::new_unchecked(self.state.as_ptr().add(1)) };
             self.index = unsafe { NonNull::new_unchecked(self.index.as_ptr().add(1)) };
-            
+
             let idx = unsafe { *self.index.as_ptr() };
             let arch = unsafe { self.archetypes.get(idx).unwrap_unchecked() };
 

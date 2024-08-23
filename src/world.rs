@@ -322,7 +322,7 @@ impl World {
     /// If the handler already exists (as determined by [`Handler::type_id`])
     /// then the `HandlerId` of the existing handler is returned and no
     /// event is sent.
-    /// 
+    ///
     /// Returns an error if the configuration of the handler is invalid.
     pub(crate) fn try_add_handler<H: IntoHandler<M>, M>(
         &mut self,

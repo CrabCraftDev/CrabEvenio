@@ -45,7 +45,7 @@ impl<T> BitSet<T> {
     }
 
     /// Grows the bit set to the given block index (if necessary) and returns a
-    /// mutable reference to the block at that index. If the block index is 
+    /// mutable reference to the block at that index. If the block index is
     /// already in bounds, this method will not modify `self.blocks`.
     #[inline]
     #[track_caller]
