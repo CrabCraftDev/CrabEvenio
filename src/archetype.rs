@@ -194,8 +194,8 @@ impl Archetypes {
             //  `Archetype::new` requires that this slice outlives the
             //  archetype. This conflicts with the archetype still being in
             //  scope and used for the remainder of this loop body.
-            //  (note referenced below in `traverse_insert` and
-            //  `traverse_remove`)
+            //  (note referenced below in `traverse_insert`, `traverse_remove`,
+            //  and `create_archetype`)
             // NOTE: Using plain `.remove()` here makes Miri sad.
             self.by_components.remove_entry(arch.component_indices());
 
@@ -228,6 +228,49 @@ impl Archetypes {
                 other_arch.insert_components.remove(&comp_idx);
             }
         }
+    }
+
+    /// Creates a new archetype with the given component indices.
+    ///
+    /// # Safety
+    ///
+    /// Component indices must be valid, in sorted order and deduplicated.
+    unsafe fn create_archetype(
+        &mut self,
+        component_indices: &[ComponentIdx],
+        components: &mut Components,
+        handlers: &mut Handlers,
+    ) -> ArchetypeIdx {
+        let component_indices = AliasedBox::from(Box::from(component_indices));
+        let component_indices_ptr = AliasedBox::as_non_null(&component_indices);
+
+        let archetypes_entry = self.archetypes.vacant_entry();
+        let by_components_entry = match self.by_components.entry(component_indices) {
+            Entry::Occupied(entry) => return *entry.get(),
+            Entry::Vacant(entry) => entry,
+        };
+
+        let arch_idx = ArchetypeIdx(archetypes_entry.key() as u32);
+
+        // Construct the new archetype.
+        // SAFETY:
+        // - Component indices slice is valid, sorted and deduplicated as per guarantees
+        //   of the caller.
+        // - We only drop the component indices slice after dropping the archetype (or
+        //   so we should; see FIXME note in `remove_component` above).
+        let mut arch = Archetype::new(arch_idx, component_indices_ptr, components);
+
+        // Register all event handlers for the new archetype.
+        for info in handlers.iter_mut() {
+            arch.register_handler(info);
+        }
+
+        // Insert the archetype into the vacant entries and
+        // our archetype list.
+        by_components_entry.insert(arch_idx);
+        archetypes_entry.insert(arch);
+
+        arch_idx
     }
 
     /// Traverses one edge of the archetype graph in the insertion direction.
@@ -1477,5 +1520,21 @@ mod tests {
         world.insert(ab, C);
 
         world.remove::<B>(ab);
+    }
+
+    #[test]
+    fn by_components() {
+        #[derive(Component)]
+        struct A;
+
+        let mut world = World::new();
+        let a_id = world.add_component::<A>();
+        let e = world.spawn();
+        world.insert(e, A);
+
+        assert!(world
+            .archetypes()
+            .get_by_components(&[a_id.index()])
+            .is_some());
     }
 }
