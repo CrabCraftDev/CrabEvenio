@@ -681,9 +681,18 @@ impl Archetypes {
         arch_idx
     }
 
-    /// Move an entity from one archetype to another. Returns the entity's row
-    /// in the new archetype.
-    // TODO: Document safety requirements
+    /// Moves an entity from one archetype to another. Returns the entity's row
+    /// in the new archetype. The `new_components` iterator is expected to yield
+    /// pairs of every component index that is contained in the component
+    /// indices of the destination, but not the source archetype, along with a
+    /// valid pointer to a component of the type that corresponds to that
+    /// component index.
+    /// 
+    /// # Safety
+    /// 
+    /// - `src` must be valid.
+    /// - `dst` must be valid.
+    /// - `new_components` must fulfill the requirements stated above.
     // NOTE: As of now, this function is never called with more than one new
     // component. Still, its implementation seems to already support bulk
     // insertion / removal of components.
