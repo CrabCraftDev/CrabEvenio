@@ -1,13 +1,14 @@
 //! [`Archetype`] and related items.
 
-use alloc::alloc::{alloc, dealloc, realloc};
-use alloc::collections::btree_map::Entry as BTreeEntry;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
+use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::alloc::Layout;
+use core::borrow::Borrow;
 use core::cmp::Ordering;
-use core::ops::Index;
+use core::hash::{Hash, Hasher};
+use core::ops::{Deref, Index};
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr::NonNull;
 use core::{fmt, mem, ptr, slice};
@@ -48,19 +49,449 @@ use crate::world::UnsafeWorldCell;
 pub struct Archetypes {
     /// Always contains the empty archetype at index 0.
     archetypes: Slab<Archetype>,
-    by_components: HashMap<AliasedBox<[ComponentIdx]>, ArchetypeIdx>,
+    by_components: HashMap<ComponentIndicesPtr, ArchetypeIdx>,
+}
+
+/// A sorted, deduplicated list of component indices.
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub struct ComponentIndices {
+    slice: AliasedBox<[ComponentIdx]>,
+}
+
+impl ComponentIndices {
+    fn check(slice: &[ComponentIdx]) {
+        assert!(slice.is_sorted(), "Component indices must be sorted");
+
+        // Check for duplicates. This algorithm makes use of the fact that we
+        // know the slice is sorted (from the check above).
+        for i in 0..slice.len() - 1 {
+            let this = slice[i];
+            let next = slice[i + 1];
+            assert_ne!(this, next, "Component indices must be deduplicated");
+        }
+    }
+
+    /// Returns an empty list of component indices.
+    pub(crate) fn empty() -> Self {
+        Self {
+            slice: AliasedBox::from(Box::from([].as_slice())),
+        }
+    }
+
+    /// Constructs a list of component indices from the given iterator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice is not sorted or contains duplicates.
+    pub(crate) fn from_iter(iter: impl Iterator<Item = ComponentIdx>) -> Self {
+        Self::from_boxed_slice(iter.collect())
+    }
+
+    /// Constructs a list of component indices from the given slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice is not sorted or contains duplicates.
+    pub(crate) fn from_slice(slice: &[ComponentIdx]) -> Self {
+        Self::check(slice);
+
+        Self {
+            slice: AliasedBox::from(Box::from(slice)),
+        }
+    }
+
+    /// Constructs a list of component indices from the given boxed slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice is not sorted or contains duplicates.
+    pub(crate) fn from_boxed_slice(boxed_slice: Box<[ComponentIdx]>) -> Self {
+        Self::check(&*boxed_slice);
+
+        Self {
+            slice: boxed_slice.into(),
+        }
+    }
+
+    /// Returns a list of component indices which contains all component
+    /// indices of `self`, as well as `component_index`. If `self` already
+    /// contained the given component index, a clone of `self` is returned.
+    pub fn with(&self, component_index: ComponentIdx) -> Self {
+        // Binary search for the inserted component index in our slice. If the
+        // search succeeds, we already have the component index, so we return
+        // a clone of `self`. If it fails, the `binary_search` function tells us
+        // where to insert the new component index such that the slice remains
+        // sorted, so we insert the component index at that position.
+        match self.binary_search(&component_index) {
+            Ok(_) => self.clone(),
+            Err(position) => Self {
+                slice: boxed_slice::insert(&self, position, component_index).into(),
+            },
+        }
+    }
+
+    /// Returns a list of component indices which contains all component
+    /// indices of `self`, but not `component_index`. If `self` already did not
+    /// contain the given component index, a clone of `self` is returned.
+    pub fn without(&self, component_index: ComponentIdx) -> Self {
+        // Binary search for the removed component index in our slice. If the
+        // search fails, we already don't have the component index, so we return
+        // a clone of `self`. If it succeeds, the `binary_search` function tells
+        // us where it found the component index, so we remove the component
+        // index at that position.
+        match self.binary_search(&component_index) {
+            Err(_) => self.clone(),
+            Ok(position) => Self {
+                slice: boxed_slice::remove(&self, position).into(),
+            },
+        }
+    }
+
+    /// Returns a pointer to the contained slice.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer may **not** outlive `self`. Any usage of the
+    /// pointer, even through safe APIs, can result in undefined behaviour after
+    /// `self` is dropped.
+    pub(crate) unsafe fn as_ptr(&self) -> ComponentIndicesPtr {
+        ComponentIndicesPtr {
+            ptr: AliasedBox::as_non_null(&self.slice),
+        }
+    }
+}
+
+mod boxed_slice {
+    use alloc::alloc::{alloc, handle_alloc_error, Layout};
+    #[cfg(not(feature = "std"))]
+    use alloc::{boxed::Box, vec};
+    use core::mem::{transmute, MaybeUninit};
+    use core::ptr::slice_from_raw_parts_mut;
+
+    /// Constructs a boxed slice which equals `source` with `element` inserted
+    /// at `index`. This doesn't actually allocate if `T` is zero-sized.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    /// ```ignore
+    /// let source = [1, 2, 4, 5].as_slice();
+    /// let element = 3;
+    /// let result: Box<[u32]> = boxed_slice::insert(source, 2, element);
+    /// assert_eq!(result.len(), source.len() + 1);
+    /// assert_eq!(&result[0..2], &source[0..2]);
+    /// assert_eq!(&result[2], &element);
+    /// assert_eq!(&result[3..5], &source[2..4]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index is out of range for the constructed slice (it may
+    /// equal `source.len()`) or if `source.len() == usize::MAX`.
+    pub(crate) fn insert<T: Copy>(source: &[T], index: usize, element: T) -> Box<[T]> {
+        let new_len = source.len().checked_add(1).unwrap();
+        assert!(index < new_len);
+
+        if size_of::<T>() == 0 {
+            // If `T` is zero-sized, we use a shortcut. Values of a zero-sized
+            // type are indiscernible, so we just "copy" `element` to the
+            // appropriate length and return a boxed slice of that. Since `T`
+            // is zero-sized, this doesn't actually allocate.
+            return vec![element; new_len].into_boxed_slice();
+        }
+
+        // Allocate the boxed slice which we will insert the element into.
+        // TODO: Use Box::new_uninit_slice once it's stable.
+        let target_layout = Layout::array::<T>(new_len).unwrap();
+        // SAFETY: The size of `target_layout` cannot be zero, as `new_len` is
+        // guaranteed to be positive and we checked above that `T` is not
+        // zero-sized.
+        let pointer = unsafe { alloc(target_layout) };
+        if pointer.is_null() {
+            handle_alloc_error(target_layout);
+        }
+
+        // Make the allocation a boxed slice.
+        let pointer = pointer.cast::<MaybeUninit<T>>();
+        let pointer = slice_from_raw_parts_mut(pointer, new_len);
+        // SAFETY: We used the global allocator to allocate the correct layout
+        // (which is correct because `MaybeUninit<T>` and `T` have the same
+        // layout), so calling `Box::from_raw` here is fine.
+        let mut boxed = unsafe { Box::from_raw(pointer) };
+
+        // Prepare the source slice by transmuting it from &[T] to
+        // &[MaybeUninit<T>], so we can copy them into the uninitialized slice.
+        // SAFETY: Transmuting from `T` to `MaybeUninit<T>` is safe. We could
+        // call `map` and call `MaybeUninit::new` on each element, but this
+        // `transmute` saves us the iterator overhead and handles the whole
+        // slice at once.
+        let source: &[MaybeUninit<T>] = unsafe { transmute(source) };
+
+        // Copy the initial and final parts from `source`, leaving a gap for the
+        // element to insert.
+        boxed[..index].copy_from_slice(&source[..index]);
+        boxed[index + 1..].copy_from_slice(&source[index..]);
+
+        // Insert the element.
+        boxed[index] = MaybeUninit::new(element);
+
+        // Transmute the boxed slice from Box<[MaybeUninit<T>]> to Box<[T]>,
+        // effectively assuming its elements are initialized. This is fine
+        // because we initialized the elements at `..index`, `index` and
+        // `index + 1..`, which covers all indices of the boxed slice.
+        unsafe { transmute(boxed) }
+    }
+
+    /// Constructs a boxed slice which equals `source` with the element at
+    /// `index` removed. This doesn't actually allocate if `T` is zero-sized.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    /// ```ignore
+    /// let source = [1, 2, 3, 4, 5].as_slice();
+    /// let result: Box<[u32]> = boxed_slice::remove(source, 2);
+    /// assert_eq!(result.len(), source.len() - 1);
+    /// assert_eq!(&result[0..2], &source[0..2]);
+    /// assert_eq!(&result[2..4], &source[3..5]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index is out of range or if `source.len() == 0`.
+    pub(crate) fn remove<T: Copy>(source: &[T], index: usize) -> Box<[T]> {
+        assert!(index < source.len());
+        let new_len = source.len().checked_sub(1).unwrap();
+
+        if size_of::<T>() == 0 {
+            // If `T` is zero-sized, we use a shortcut. Values of a zero-sized
+            // type are indiscernible, so we just "copy" the first element in
+            // `source` to the appropriate length and return a boxed slice of
+            // that. Since `T` is zero-sized, this doesn't actually allocate.
+            // SAFETY: We checked `source` is not empty using `checked_sub`
+            // above.
+            let element = unsafe { *source.get_unchecked(0) };
+            return vec![element; new_len].into_boxed_slice();
+        }
+
+        // Allocate the boxed slice which we will insert the element into.
+        // TODO: Use Box::new_uninit_slice once it's stable.
+        let target_layout = Layout::array::<T>(new_len).unwrap();
+        // SAFETY: The size of `target_layout` cannot be zero, as `new_len` is
+        // guaranteed to be positive and we checked above that `T` is not
+        // zero-sized.
+        let pointer = unsafe { alloc(target_layout) };
+        if pointer.is_null() {
+            handle_alloc_error(target_layout);
+        }
+
+        // Make the allocation a boxed slice.
+        let pointer = pointer.cast::<MaybeUninit<T>>();
+        let pointer = slice_from_raw_parts_mut(pointer, new_len);
+        // SAFETY: We used the global allocator to allocate the correct layout
+        // (which is correct because `MaybeUninit<T>` and `T` have the same
+        // layout), so calling `Box::from_raw` here is fine.
+        let mut boxed = unsafe { Box::from_raw(pointer) };
+
+        // Prepare the source slice by transmuting it from &[T] to
+        // &[MaybeUninit<T>], so we can copy them into the uninitialized slice.
+        // SAFETY: Transmuting from `T` to `MaybeUninit<T>` is safe. We could
+        // call `map` and call `MaybeUninit::new` on each element, but this
+        // `transmute` saves us the iterator overhead and handles the whole
+        // slice at once.
+        let source: &[MaybeUninit<T>] = unsafe { transmute(source) };
+
+        // Copy the initial and final parts from `source`, skipping the removed
+        // element.
+        boxed[..index].copy_from_slice(&source[..index]);
+        boxed[index..].copy_from_slice(&source[index + 1..]);
+
+        // Transmute the boxed slice from Box<[MaybeUninit<T>]> to Box<[T]>,
+        // effectively assuming its elements are initialized. This is fine
+        // because we initialized the elements at `..index` and `index..`,
+        // which covers all indices of the boxed slice.
+        unsafe { transmute(boxed) }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use evenio::archetype::boxed_slice::{insert, remove};
+
+        #[test]
+        fn insert_at_start() {
+            let source = [1, 2, 3, 4].as_slice();
+            let result = insert(source, 0, 0);
+            assert_eq!(&*result, &[0, 1, 2, 3, 4]);
+        }
+
+        #[test]
+        fn insert_in_mid() {
+            let source = [1, 2, 4, 5].as_slice();
+            let result = insert(source, 2, 3);
+            assert_eq!(&*result, &[1, 2, 3, 4, 5]);
+        }
+
+        #[test]
+        fn insert_at_end() {
+            let source = [1, 2, 3, 4].as_slice();
+            let result = insert(source, 4, 5);
+            assert_eq!(&*result, &[1, 2, 3, 4, 5]);
+        }
+
+        #[test]
+        fn insert_zero_sized() {
+            let source = [(), (), (), ()].as_slice();
+            let result = insert(source, 1, ());
+            assert_eq!(&*result, &[(), (), (), (), ()])
+        }
+
+        #[test]
+        #[should_panic]
+        fn insert_out_of_bounds() {
+            let source = [1, 2, 3, 4].as_slice();
+            insert(source, 5, 6);
+        }
+
+        #[test]
+        fn remove_at_start() {
+            let source = [1, 2, 3, 4, 5].as_slice();
+            let result = remove(source, 0);
+            assert_eq!(&*result, &[2, 3, 4, 5]);
+        }
+
+        #[test]
+        fn remove_in_mid() {
+            let source = [1, 2, 3, 4, 5].as_slice();
+            let result = remove(source, 2);
+            assert_eq!(&*result, &[1, 2, 4, 5]);
+        }
+
+        #[test]
+        fn remove_at_end() {
+            let source = [1, 2, 3, 4, 5].as_slice();
+            let result = remove(source, 4);
+            assert_eq!(&*result, &[1, 2, 3, 4]);
+        }
+
+        #[test]
+        fn remove_zero_sized() {
+            let source = [(), (), (), (), ()].as_slice();
+            let result = remove(source, 1);
+            assert_eq!(&*result, &[(), (), (), ()])
+        }
+
+        #[test]
+        #[should_panic]
+        fn remove_out_of_bounds() {
+            let source = [1, 2, 3, 4, 5].as_slice();
+            remove(source, 5);
+        }
+    }
+}
+
+impl Clone for ComponentIndices {
+    fn clone(&self) -> Self {
+        Self {
+            slice: AliasedBox::from(Box::from(&**self)),
+        }
+    }
+}
+
+// No BorrowMut implementation: that would allow aliased mutability via
+// `ComponentIndicesPtr`.
+impl Borrow<[ComponentIdx]> for ComponentIndices {
+    fn borrow(&self) -> &[ComponentIdx] {
+        &self.slice
+    }
+}
+
+// No AsMut implementation: that would allow aliased mutability via
+// `ComponentIndicesPtr`.
+impl AsRef<[ComponentIdx]> for ComponentIndices {
+    fn as_ref(&self) -> &[ComponentIdx] {
+        &self.slice
+    }
+}
+
+// No DerefMut implementation: that would allow aliased mutability via
+// `ComponentIndicesPtr`.
+impl Deref for ComponentIndices {
+    type Target = [ComponentIdx];
+
+    fn deref(&self) -> &Self::Target {
+        &self.slice
+    }
+}
+
+/// A non-null pointer to a sorted and deduplicated slice of component indices.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct ComponentIndicesPtr {
+    ptr: NonNull<[ComponentIdx]>,
+}
+
+impl PartialEq for ComponentIndicesPtr {
+    fn eq(&self, other: &Self) -> bool {
+        &**self == &**other
+    }
+}
+
+impl Eq for ComponentIndicesPtr {}
+
+impl Hash for ComponentIndicesPtr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (&**self).hash(state);
+    }
+}
+
+// No BorrowMut implementation: that would allow aliased mutability.
+impl Borrow<[ComponentIdx]> for ComponentIndicesPtr {
+    fn borrow(&self) -> &[ComponentIdx] {
+        // SAFETY: The pointer is only ever constructed in
+        // `ComponentIndices::as_ptr`, where the caller guarantees that this
+        // pointer does not outlive the `ComponentIndices` it references. Hence,
+        // the slice must still be initialized at this point. We don't give out
+        // mutable references to this slice anywhere, so aliasing rules are
+        // trivially followed. All other requirements (alignment,
+        // dereferenceability) for the call to `as_ref` are guaranteed by
+        // `as_ptr`'s implementation.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+// No AsMut implementation: that would allow aliased mutability.
+impl AsRef<[ComponentIdx]> for ComponentIndicesPtr {
+    fn as_ref(&self) -> &[ComponentIdx] {
+        self.borrow()
+    }
+}
+
+// No DerefMut implementation: that would allow aliased mutability.
+impl Deref for ComponentIndicesPtr {
+    type Target = [ComponentIdx];
+
+    fn deref(&self) -> &Self::Target {
+        self.borrow()
+    }
 }
 
 impl Archetypes {
     /// Constructs a new `Archetypes` instance, which contains only the empty
     /// archetype.
     pub(crate) fn new() -> Self {
-        let mut map = HashMap::with_hasher(RandomState::new());
-        map.insert(vec![].into_boxed_slice().into(), ArchetypeIdx::EMPTY);
+        let empty_arch = Archetype::empty();
+
+        // SAFETY: We only remove archetypes in `remove_component`, where we
+        // first remove the `by_components` entry (dropping the component
+        // indices pointer) and *then* drop the archetype that owns the
+        // component indices.
+        let component_indices_ptr = unsafe { empty_arch.component_indices.as_ptr() };
+
+        let mut by_components = HashMap::with_hasher(RandomState::new());
+        by_components.insert(component_indices_ptr, ArchetypeIdx::EMPTY);
 
         Self {
-            archetypes: Slab::from_iter([(0, Archetype::empty())]),
-            by_components: map,
+            archetypes: Slab::from_iter([(0, empty_arch)]),
+            by_components,
         }
     }
 
@@ -173,7 +604,7 @@ impl Archetypes {
         // their columns.
         for arch_idx in info.member_of.drain(..) {
             // Remove the archetype.
-            let mut arch = self.archetypes.remove(arch_idx.0 as usize);
+            let arch = self.archetypes.remove(arch_idx.0 as usize);
 
             // Notify all handlers listening for updates affecting the archetype
             // that it was removed.
@@ -183,69 +614,50 @@ impl Archetypes {
 
             // Remove the archetype from the `member_of` lists of its
             // components.
-            for &comp_idx in arch.component_indices() {
+            for &comp_idx in &**arch.component_indices() {
                 if comp_idx != removed_component_id.index() {
                     let info = unsafe { components.get_by_index_mut(comp_idx).unwrap_unchecked() };
                     info.member_of.swap_remove(&arch_idx);
                 }
             }
 
-            // FIXME: This line drops the component indices slice. However,
-            //  `Archetype::new` requires that this slice outlives the
-            //  archetype. This conflicts with the archetype still being in
-            //  scope and used for the remainder of this loop body.
-            //  (note referenced below in `traverse_insert`, `traverse_remove`,
-            //  and `create_archetype`)
             // NOTE: Using plain `.remove()` here makes Miri sad.
-            self.by_components.remove_entry(arch.component_indices());
+            // SAFETY: The component indices pointer created is a temporary
+            // value that is dropped before the archetype is dropped at the end
+            // of the loop body.
+            self.by_components
+                .remove_entry(&unsafe { arch.component_indices.as_ptr() });
 
             // Call the removed entity callback for each entity id in the
             // archetype.
             for &entity_id in arch.entity_ids() {
                 removed_entity_callback(entity_id);
             }
-
-            // Remove all references to the removed archetype that the other
-            // archetypes still hold.
-
-            for (comp_idx, arch_idx) in mem::take(&mut arch.insert_components) {
-                let other_arch = unsafe {
-                    self.archetypes
-                        .get_mut(arch_idx.0 as usize)
-                        .unwrap_unchecked()
-                };
-
-                other_arch.remove_components.remove(&comp_idx);
-            }
-
-            for (comp_idx, arch_idx) in mem::take(&mut arch.remove_components) {
-                let other_arch = unsafe {
-                    self.archetypes
-                        .get_mut(arch_idx.0 as usize)
-                        .unwrap_unchecked()
-                };
-
-                other_arch.insert_components.remove(&comp_idx);
-            }
         }
     }
 
-    /// Creates a new archetype with the given component indices.
+    /// Creates a new archetype with the given component indices and returns its
+    /// index. If an archetype with the given component indices already exists,
+    /// its index is returned and no archetype is created.
     ///
     /// # Safety
     ///
-    /// Component indices must be valid, in sorted order and deduplicated.
-    unsafe fn create_archetype(
+    /// Component indices must be valid (i.e. their respective components must
+    /// exist).
+    pub(crate) unsafe fn create_archetype(
         &mut self,
-        component_indices: &[ComponentIdx],
+        component_indices: ComponentIndices,
         components: &mut Components,
         handlers: &mut Handlers,
     ) -> ArchetypeIdx {
-        let component_indices = AliasedBox::from(Box::from(component_indices));
-        let component_indices_ptr = AliasedBox::as_non_null(&component_indices);
+        // SAFETY: We only remove archetypes in `remove_component`, where we
+        // first remove the `by_components` entry (dropping the component
+        // indices pointer) and *then* drop the archetype that owns the
+        // component indices.
+        let component_indices_ptr = component_indices.as_ptr();
 
         let archetypes_entry = self.archetypes.vacant_entry();
-        let by_components_entry = match self.by_components.entry(component_indices) {
+        let by_components_entry = match self.by_components.entry(component_indices_ptr) {
             Entry::Occupied(entry) => return *entry.get(),
             Entry::Vacant(entry) => entry,
         };
@@ -253,12 +665,8 @@ impl Archetypes {
         let arch_idx = ArchetypeIdx(archetypes_entry.key() as u32);
 
         // Construct the new archetype.
-        // SAFETY:
-        // - Component indices slice is valid, sorted and deduplicated as per guarantees
-        //   of the caller.
-        // - We only drop the component indices slice after dropping the archetype (or
-        //   so we should; see FIXME note in `remove_component` above).
-        let mut arch = Archetype::new(arch_idx, component_indices_ptr, components);
+        // SAFETY: Caller guarantees component indices are valid.
+        let mut arch = Archetype::new(arch_idx, component_indices, components);
 
         // Register all event handlers for the new archetype.
         for info in handlers.iter_mut() {
@@ -271,241 +679,6 @@ impl Archetypes {
         archetypes_entry.insert(arch);
 
         arch_idx
-    }
-
-    /// Traverses one edge of the archetype graph in the insertion direction.
-    /// Returns the destination archetype.
-    ///
-    /// If the archetype with the added component does not exist, then it is
-    /// created. Otherwise, the existing archetype is returned.
-    ///
-    /// # Safety
-    ///
-    /// - `src_arch_idx` must be valid
-    /// - `component_idx` must be valid
-    pub(crate) unsafe fn traverse_insert(
-        &mut self,
-        src_arch_idx: ArchetypeIdx,
-        component_idx: ComponentIdx,
-        components: &mut Components,
-        handlers: &mut Handlers,
-    ) -> ArchetypeIdx {
-        debug_assert!(components.get_by_index(component_idx).is_some());
-
-        let next_arch_idx = self.archetypes.vacant_key();
-
-        // Get a mutable reference to the source archetype by index.
-        // SAFETY: Caller guaranteed that the index is valid.
-        let src_arch = unsafe {
-            self.archetypes
-                .get_mut(src_arch_idx.0 as usize)
-                .unwrap_unchecked()
-        };
-
-        // Look up the archetype with the inserted component. If it exists,
-        // return it, otherwise we probably need to create it.
-        match src_arch.insert_components.entry(component_idx) {
-            BTreeEntry::Vacant(vacant_insert_components) => {
-                // Binary search for the inserted component's index in the
-                // source archetype's component indices. If the search succeeds,
-                // the source archetype already has the component, so we return
-                // it. If it fails, the `binary_search` function tells us where
-                // to insert the new component index such that the slice remains
-                // sorted.
-                let Err(idx) = src_arch
-                    .component_indices
-                    .as_ref()
-                    .binary_search(&component_idx)
-                else {
-                    // Source archetype already has this component.
-                    return src_arch_idx;
-                };
-
-                // Clone the source component indices slice and insert the new
-                // component index at the correct position.
-                let mut new_components = Vec::with_capacity(src_arch.component_indices.len() + 1);
-                new_components.extend(src_arch.component_indices.as_ref().iter().copied());
-                new_components.insert(idx, component_idx);
-
-                // Look up if we have an archetype for the new component
-                // indices. If we do, insert it into the source archetype's
-                // `insert_components` map and return it. If we don't, create
-                // it.
-                match self
-                    .by_components
-                    .entry(new_components.into_boxed_slice().into())
-                {
-                    Entry::Vacant(vacant_by_components) => {
-                        // Check for overflow of archetype indices.
-                        assert!(next_arch_idx < u32::MAX as usize, "too many archetypes");
-
-                        let arch_id = ArchetypeIdx(next_arch_idx as u32);
-
-                        // Construct the new archetype.
-                        // SAFETY:
-                        // - Component indices slice is in sorted order, as we created it by cloning
-                        //   a sorted slice and inserting a component index in the correct position
-                        //   that maintains the sorted order (see above).
-                        // - Similar rationale for validity of the indices: the source component
-                        //   indices slice was valid, and we only added an index that the caller of
-                        //   this function guaranteed to be valid.
-                        // - We only drop the component indices slice after dropping the archetype
-                        //   (or so we should; see FIXME note in `remove_component` above).
-                        let mut new_arch = Archetype::new(
-                            arch_id,
-                            vacant_by_components.key().as_ref().into(),
-                            components,
-                        );
-
-                        // Insert a backlink to the source archetype.
-                        new_arch
-                            .remove_components
-                            .insert(component_idx, src_arch_idx);
-
-                        // Register all event handlers for the new archetype.
-                        for info in handlers.iter_mut() {
-                            new_arch.register_handler(info);
-                        }
-
-                        // Insert the archetype into the vacant entries and
-                        // our archetype list.
-                        vacant_by_components.insert(arch_id);
-                        vacant_insert_components.insert(arch_id);
-                        self.archetypes.insert(new_arch);
-
-                        arch_id
-                    }
-                    Entry::Occupied(entry) => {
-                        // The archetype already exists, insert it into the
-                        // map and return it.
-                        *vacant_insert_components.insert(*entry.get())
-                    }
-                }
-            }
-            BTreeEntry::Occupied(entry) => {
-                // The archetype already exists, return it.
-                *entry.get()
-            }
-        }
-    }
-
-    /// Traverses one edge of the archetype graph in the remove direction.
-    /// Returns the destination archetype.
-    ///
-    /// If the archetype with the removed component does not exist, then it is
-    /// created. Otherwise, the existing archetype is returned.
-    ///
-    /// # Safety
-    ///
-    /// - `src_arch_idx` must be valid
-    /// - `component_idx` must be valid
-    pub(crate) unsafe fn traverse_remove(
-        &mut self,
-        src_arch_idx: ArchetypeIdx,
-        component_idx: ComponentIdx,
-        components: &mut Components,
-        handlers: &mut Handlers,
-    ) -> ArchetypeIdx {
-        let next_arch_idx = self.archetypes.vacant_key();
-
-        // Get a mutable reference to the source archetype by index.
-        // SAFETY: Caller guaranteed that the index is valid.
-        let src_arch = unsafe {
-            self.archetypes
-                .get_mut(src_arch_idx.0 as usize)
-                .unwrap_unchecked()
-        };
-
-        // Look up the archetype without the removed component. If it exists,
-        // return it, otherwise we probably need to create it.
-        match src_arch.remove_components.entry(component_idx) {
-            BTreeEntry::Vacant(vacant_remove_components) => {
-                // Binary search for the removed component's index in the
-                // source archetype's component indices. If the search fails,
-                // the source archetype already lacks the component, so we
-                // return it.
-                // NOTE: If the binary search succeeds, we know exactly the
-                // position of the component index to remove. This leads to no
-                // performance opportunities with the iterator approach to
-                // cloning the indices slice that is used below, but may be
-                // helpful when switching to a direct memory-level copy of the
-                // slice into a Vec, from which the respective component index
-                // could then be removed in a targeted way.
-                if src_arch
-                    .component_indices
-                    .as_ref()
-                    .binary_search(&component_idx)
-                    .is_err()
-                {
-                    // Archetype already doesn't have the component.
-                    return src_arch_idx;
-                }
-
-                // Clone the source component indices slice while filtering out
-                // the removed component index.
-                let new_components: Box<[ComponentIdx]> = src_arch
-                    .component_indices
-                    .as_ref()
-                    .iter()
-                    .copied()
-                    .filter(|&c| c != component_idx)
-                    .collect();
-
-                // Look up if we have an archetype for the new component
-                // indices. If we do, insert it into the source archetype's
-                // `remove_components` map and return it. If we don't, create
-                // it.
-                match self.by_components.entry(new_components.into()) {
-                    Entry::Vacant(vacant_by_components) => {
-                        // Check for overflow of archetype indices.
-                        assert!(next_arch_idx < u32::MAX as usize, "too many archetypes");
-
-                        let arch_id = ArchetypeIdx(next_arch_idx as u32);
-
-                        // Construct the new archetype.
-                        // SAFETY:
-                        // - Component indices slice is in sorted order, as we created it by cloning
-                        //   a sorted slice and filtering out a single component index.
-                        // - Similar rationale for validity of the indices: the source component
-                        //   indices slice was valid, and we then only removed an index.
-                        // - We only drop the component indices slice after dropping the archetype
-                        //   (or so we should; see FIXME note in `remove_component` above).
-                        let mut new_arch = Archetype::new(
-                            arch_id,
-                            vacant_by_components.key().as_ref().into(),
-                            components,
-                        );
-
-                        // Insert a backlink to the source archetype.
-                        new_arch
-                            .insert_components
-                            .insert(component_idx, src_arch_idx);
-
-                        // Register all event handlers for the new archetype.
-                        for info in handlers.iter_mut() {
-                            new_arch.register_handler(info);
-                        }
-
-                        // Insert the archetype into the vacant entries and
-                        // our archetype list.
-                        vacant_by_components.insert(arch_id);
-                        vacant_remove_components.insert(arch_id);
-                        self.archetypes.insert(new_arch);
-
-                        arch_id
-                    }
-                    Entry::Occupied(entry) => {
-                        // The archetype already exists, insert it into the
-                        // map and return it.
-                        *vacant_remove_components.insert(*entry.get())
-                    }
-                }
-            }
-            BTreeEntry::Occupied(entry) => {
-                // The archetype already exists, return it.
-                *entry.get()
-            }
-        }
     }
 
     /// Move an entity from one archetype to another. Returns the entity's row
@@ -654,8 +827,8 @@ impl Archetypes {
                     // destination column or if there is a destination column
                     // with no matching source column.
 
-                    let src_comp_idx = *src_arch.component_indices.as_ref().get_unchecked(src_idx);
-                    let dst_comp_idx = *dst_arch.component_indices.as_ref().get_unchecked(dst_idx);
+                    let src_comp_idx = *src_arch.component_indices.get_unchecked(src_idx);
+                    let dst_comp_idx = *dst_arch.component_indices.get_unchecked(dst_idx);
 
                     match src_comp_idx.cmp(&dst_comp_idx) {
                         Ordering::Less => {
@@ -710,8 +883,7 @@ impl Archetypes {
 
                             let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
 
-                            let dst_comp_idx =
-                                *dst_arch.component_indices.as_ref().get_unchecked(dst_idx);
+                            let dst_comp_idx = *dst_arch.component_indices.get_unchecked(dst_idx);
 
                             debug_assert_eq!(component_idx, dst_comp_idx);
 
@@ -759,7 +931,7 @@ impl Archetypes {
 
                     let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
 
-                    let dst_comp_idx = *dst_arch.component_indices.as_ref().get_unchecked(dst_idx);
+                    let dst_comp_idx = *dst_arch.component_indices.get_unchecked(dst_idx);
 
                     debug_assert_eq!(component_idx, dst_comp_idx);
 
@@ -966,7 +1138,7 @@ pub struct Archetype {
     /// The index of this archetype. Provided here for convenience.
     index: ArchetypeIdx,
     /// Component indices of this archetype, one per column in sorted order.
-    component_indices: NonNull<[ComponentIdx]>,
+    component_indices: ComponentIndices,
     /// Columns of component data in this archetype. Sorted by component index.
     ///
     /// This is a `Box<[Column]>` with the length stripped out. The length field
@@ -975,8 +1147,6 @@ pub struct Archetype {
     /// A special column containing the [`EntityId`] for all entities in the
     /// archetype.
     entity_ids: Vec<EntityId>,
-    insert_components: BTreeMap<ComponentIdx, ArchetypeIdx>,
-    remove_components: BTreeMap<ComponentIdx, ArchetypeIdx>,
     /// Handlers that need to be notified about column changes.
     refresh_listeners: BTreeSet<HandlerInfoPtr>,
     /// Targeted event listeners for this archetype.
@@ -988,11 +1158,9 @@ impl Archetype {
     fn empty() -> Self {
         Self {
             index: ArchetypeIdx::EMPTY,
-            component_indices: NonNull::from(<&[_]>::default()),
+            component_indices: ComponentIndices::empty(),
             columns: NonNull::dangling(),
             entity_ids: vec![],
-            insert_components: BTreeMap::new(),
-            remove_components: BTreeMap::new(),
             refresh_listeners: BTreeSet::new(),
             event_listeners: SparseMap::new(),
         }
@@ -1002,12 +1170,10 @@ impl Archetype {
     ///
     /// # Safety
     ///
-    /// - Component indices slice must be in sorted order.
-    /// - Component indices slice must outlive the archetype.
-    /// - All component indices must be valid.
+    /// All component indices must be valid.
     unsafe fn new(
         arch_idx: ArchetypeIdx,
-        component_indices: NonNull<[ComponentIdx]>,
+        component_indices: ComponentIndices,
         components: &mut Components,
     ) -> Self {
         // Create a column for each component and register this archetype in the
@@ -1039,8 +1205,6 @@ impl Archetype {
             component_indices,
             columns: columns_ptr,
             entity_ids: vec![],
-            insert_components: BTreeMap::new(),
-            remove_components: BTreeMap::new(),
             refresh_listeners: BTreeSet::new(),
             event_listeners: SparseMap::new(),
         }
@@ -1107,13 +1271,13 @@ impl Archetype {
         &self.entity_ids
     }
 
-    /// Returns a sorted slice of component types for every column in this
-    /// archetype.
+    /// Returns a sorted list of component indices corresponding to the
+    /// component types of this archetype's columns.
     ///
-    /// The returned slice has the same length as the slice returned by
+    /// The returned list has the same length as the slice returned by
     /// [`columns`](Archetype::columns).
-    pub fn component_indices(&self) -> &[ComponentIdx] {
-        unsafe { self.component_indices.as_ref() }
+    pub fn component_indices(&self) -> &ComponentIndices {
+        &self.component_indices
     }
 
     /// Returns a slice of columns sorted by [`ComponentIdx`].
@@ -1221,7 +1385,7 @@ impl Archetype {
 
             match NonNull::new(ptr) {
                 Some(ptr) => col.data = ptr,
-                None => alloc::alloc::handle_alloc_error(new_cap_layout),
+                None => handle_alloc_error(new_cap_layout),
             }
         }
 
@@ -1285,8 +1449,6 @@ impl fmt::Debug for Archetype {
             .field("component_indices", &self.component_indices())
             .field("columns", &self.columns())
             .field("entity_ids", &self.entity_ids)
-            .field("insert_components", &self.insert_components)
-            .field("remove_components", &self.remove_components)
             .field("refresh_listeners", &self.refresh_listeners)
             .field("event_listeners", &self.event_listeners)
             .finish()

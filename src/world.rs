@@ -1118,10 +1118,15 @@ impl World {
                 EventKind::Insert { component_idx } => {
                     debug_assert_ne!(target_location, EntityLocation::NULL);
 
+                    let src_arch = ctx
+                        .world
+                        .archetypes()
+                        .get(target_location.archetype)
+                        .unwrap();
+                    let dst_component_indices = src_arch.component_indices().with(component_idx);
                     let dst = unsafe {
-                        ctx.world.archetypes.traverse_insert(
-                            target_location.archetype,
-                            component_idx,
+                        ctx.world.archetypes.create_archetype(
+                            dst_component_indices,
                             &mut ctx.world.components,
                             &mut ctx.world.handlers,
                         )
@@ -1147,10 +1152,11 @@ impl World {
                     // `Remove` doesn't need drop.
                     let _ = ctx.unpack();
 
+                    let src_arch = self.archetypes().get(target_location.archetype).unwrap();
+                    let dst_component_indices = src_arch.component_indices().without(component_idx);
                     let dst = unsafe {
-                        self.archetypes.traverse_remove(
-                            target_location.archetype,
-                            component_idx,
+                        self.archetypes.create_archetype(
+                            dst_component_indices,
                             &mut self.components,
                             &mut self.handlers,
                         )
