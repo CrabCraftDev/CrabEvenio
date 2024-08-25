@@ -14,6 +14,7 @@ pub mod access;
 mod aliased_box;
 pub mod archetype;
 mod bit_set;
+mod boxed_slice;
 pub mod component;
 pub mod drop;
 pub mod entity;
