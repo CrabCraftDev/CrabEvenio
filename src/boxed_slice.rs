@@ -163,6 +163,13 @@ mod tests {
     }
 
     #[test]
+    fn insert_single() {
+        let source = [].as_slice();
+        let result = insert(source, 0, 1);
+        assert_eq!(&*result, &[1]);
+    }
+
+    #[test]
     fn insert_zero_sized() {
         let source = [(), (), (), ()].as_slice();
         let result = insert(source, 1, ());
@@ -195,6 +202,13 @@ mod tests {
         let source = [1, 2, 3, 4, 5].as_slice();
         let result = remove(source, 4);
         assert_eq!(&*result, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn remove_single() {
+        let source = [1].as_slice();
+        let result = remove(source, 0);
+        assert_eq!(&*result, &[]);
     }
 
     #[test]
