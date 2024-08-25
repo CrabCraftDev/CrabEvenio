@@ -5,9 +5,9 @@ use core::mem::{transmute, MaybeUninit};
 use core::ptr::slice_from_raw_parts_mut;
 
 /// Allocates an uninitialized slice using the global allocator.
-/// 
+///
 /// # Safety
-/// 
+///
 /// - `T` must not be zero-sized.
 /// - `len` must not be zero.
 // TODO: Use Box::new_uninit_slice instead once it's stable.
@@ -28,6 +28,16 @@ pub(crate) unsafe fn uninit<T>(len: usize) -> Box<[MaybeUninit<T>]> {
     // (which is correct because `MaybeUninit<T>` and `T` have the same
     // layout), so calling `Box::from_raw` here is fine.
     unsafe { Box::from_raw(pointer) }
+}
+
+/// Assumes that the given boxed slice of `MaybeUninit<T>` values is fully
+/// initialized and converts it into `Box<[T]>`.
+///
+/// # Safety
+///
+/// The caller must guarantee that the slice is actually fully initialized.
+pub(crate) unsafe fn assume_init<T>(slice: Box<[MaybeUninit<T>]>) -> Box<[T]> {
+    transmute(slice)
 }
 
 /// Constructs a boxed slice which equals `source` with `element` inserted
@@ -83,11 +93,10 @@ pub(crate) fn insert<T: Copy>(source: &[T], index: usize, element: T) -> Box<[T]
     // Insert the element.
     boxed[index] = MaybeUninit::new(element);
 
-    // Transmute the boxed slice from Box<[MaybeUninit<T>]> to Box<[T]>,
-    // effectively assuming its elements are initialized. This is fine
+    // Assume the elements of `boxed` are all initialized now. This is fine
     // because we initialized the elements at `..index`, `index` and
     // `index + 1..`, which covers all indices of the boxed slice.
-    unsafe { transmute(boxed) }
+    unsafe { assume_init(boxed) }
 }
 
 /// Constructs a boxed slice which equals `source` with the element at
@@ -121,7 +130,7 @@ pub(crate) fn remove<T: Copy>(source: &[T], index: usize) -> Box<[T]> {
         let element = unsafe { *source.get_unchecked(0) };
         return vec![element; new_len].into_boxed_slice();
     }
-    
+
     if new_len == 0 {
         // If `new_len` is zero, we simply return an empty boxed slice. This
         // does not actually allocate.
@@ -146,11 +155,10 @@ pub(crate) fn remove<T: Copy>(source: &[T], index: usize) -> Box<[T]> {
     boxed[..index].copy_from_slice(&source[..index]);
     boxed[index..].copy_from_slice(&source[index + 1..]);
 
-    // Transmute the boxed slice from Box<[MaybeUninit<T>]> to Box<[T]>,
-    // effectively assuming its elements are initialized. This is fine
+    // Assume the elements of `boxed` are all initialized now. This is fine
     // because we initialized the elements at `..index` and `index..`,
     // which covers all indices of the boxed slice.
-    unsafe { transmute(boxed) }
+    unsafe { assume_init(boxed) }
 }
 
 #[cfg(test)]
