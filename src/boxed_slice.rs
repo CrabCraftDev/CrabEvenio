@@ -2,24 +2,29 @@ use alloc::alloc::{alloc, handle_alloc_error, Layout};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec};
 use core::mem::{transmute, MaybeUninit};
-use core::ptr::slice_from_raw_parts_mut;
+use core::ptr::{slice_from_raw_parts_mut, NonNull};
 
-/// Allocates an uninitialized slice using the global allocator.
-///
-/// # Safety
-///
-/// - `T` must not be zero-sized.
-/// - `len` must not be zero.
+/// Allocates an uninitialized slice of the specified length using the global
+/// allocator.
 // TODO: Use Box::new_uninit_slice instead once it's stable.
-pub(crate) unsafe fn uninit<T>(len: usize) -> Box<[MaybeUninit<T>]> {
-    // Allocate the slice.
-    let target_layout = Layout::array::<T>(len).unwrap();
-    // SAFETY: The size of `target_layout` cannot be zero, as the caller
-    // guaranteed that `len` is non-zero and `T` is not zero-sized.
-    let pointer = unsafe { alloc(target_layout) };
-    if pointer.is_null() {
-        handle_alloc_error(target_layout);
-    }
+pub(crate) fn uninit<T>(len: usize) -> Box<[MaybeUninit<T>]> {
+    let layout = Layout::array::<T>(len).unwrap();
+    
+    // If the layout we would allocate with is zero-sized, we instead use a
+    // dangling pointer, since it's invalid to allocate with a zero-sized
+    // layout. Otherwise, we allocate using the global allocator.
+    let pointer = if layout.size() == 0 {
+        // Use a dangling, but correctly aligned pointer.
+        NonNull::<T>::dangling().as_ptr().cast()
+    } else {
+        // Allocate the slice.
+        // SAFETY: We just checked that `layout` has a size greater than zero.
+        let pointer = unsafe { alloc(layout) };
+        if pointer.is_null() {
+            handle_alloc_error(layout);
+        }
+        pointer
+    };
 
     // Make the allocation a boxed slice.
     let pointer = pointer.cast::<MaybeUninit<T>>();
@@ -64,18 +69,8 @@ pub(crate) fn insert<T: Copy>(source: &[T], index: usize, element: T) -> Box<[T]
     let new_len = source.len().checked_add(1).unwrap();
     assert!(index < new_len);
 
-    if size_of::<T>() == 0 {
-        // If `T` is zero-sized, we use a shortcut. Values of a zero-sized
-        // type are indiscernible, so we just "copy" `element` to the
-        // appropriate length and return a boxed slice of that. Since `T`
-        // is zero-sized, this doesn't actually allocate.
-        return vec![element; new_len].into_boxed_slice();
-    }
-
     // Allocate the boxed slice which we will insert the element into.
-    // SAFETY: `new_len` is guaranteed to be positive and we checked above
-    // that `T` is not zero-sized.
-    let mut boxed = unsafe { uninit(new_len) };
+    let mut boxed = uninit(new_len);
 
     // Prepare the source slice by transmuting it from &[T] to
     // &[MaybeUninit<T>], so we can copy them into the uninitialized slice.
@@ -120,27 +115,8 @@ pub(crate) fn remove<T: Copy>(source: &[T], index: usize) -> Box<[T]> {
     assert!(index < source.len());
     let new_len = source.len().checked_sub(1).unwrap();
 
-    if size_of::<T>() == 0 {
-        // If `T` is zero-sized, we use a shortcut. Values of a zero-sized
-        // type are indiscernible, so we just "copy" the first element in
-        // `source` to the appropriate length and return a boxed slice of
-        // that. Since `T` is zero-sized, this doesn't actually allocate.
-        // SAFETY: We checked `source` is not empty using `checked_sub`
-        // above.
-        let element = unsafe { *source.get_unchecked(0) };
-        return vec![element; new_len].into_boxed_slice();
-    }
-
-    if new_len == 0 {
-        // If `new_len` is zero, we simply return an empty boxed slice. This
-        // does not actually allocate.
-        return Box::from([].as_slice());
-    }
-
     // Allocate the boxed slice which we will insert the element into.
-    // SAFETY: We checked above that `new_len` is non-zero and that `T` is
-    // not zero-sized.
-    let mut boxed = unsafe { uninit(new_len) };
+    let mut boxed = uninit(new_len);
 
     // Prepare the source slice by transmuting it from &[T] to
     // &[MaybeUninit<T>], so we can copy them into the uninitialized slice.
