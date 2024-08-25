@@ -59,60 +59,6 @@ pub struct ComponentIndices {
 }
 
 impl ComponentIndices {
-    fn check(slice: &[ComponentIdx]) {
-        assert!(slice.is_sorted(), "Component indices must be sorted");
-
-        // Check for duplicates. This algorithm makes use of the fact that we
-        // know the slice is sorted (from the check above).
-        for i in 0..slice.len() - 1 {
-            let this = slice[i];
-            let next = slice[i + 1];
-            assert_ne!(this, next, "Component indices must be deduplicated");
-        }
-    }
-
-    /// Returns an empty list of component indices.
-    pub(crate) fn empty() -> Self {
-        Self {
-            slice: AliasedBox::from(Box::from([].as_slice())),
-        }
-    }
-
-    /// Constructs a list of component indices from the given iterator.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice is not sorted or contains duplicates.
-    pub(crate) fn from_iter(iter: impl Iterator<Item = ComponentIdx>) -> Self {
-        Self::from_boxed_slice(iter.collect())
-    }
-
-    /// Constructs a list of component indices from the given slice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice is not sorted or contains duplicates.
-    pub(crate) fn from_slice(slice: &[ComponentIdx]) -> Self {
-        Self::check(slice);
-
-        Self {
-            slice: AliasedBox::from(Box::from(slice)),
-        }
-    }
-
-    /// Constructs a list of component indices from the given boxed slice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice is not sorted or contains duplicates.
-    pub(crate) fn from_boxed_slice(boxed_slice: Box<[ComponentIdx]>) -> Self {
-        Self::check(&*boxed_slice);
-
-        Self {
-            slice: boxed_slice.into(),
-        }
-    }
-
     /// Returns a list of component indices which contains all component
     /// indices of `self`, as well as `component_index`. If `self` already
     /// contained the given component index, a clone of `self` is returned.
