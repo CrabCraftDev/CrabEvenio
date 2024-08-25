@@ -16,7 +16,6 @@ use core::{fmt, mem, ptr, slice};
 use ahash::RandomState;
 use slab::Slab;
 
-use crate::{assume_unchecked, boxed_slice};
 use crate::component::{ComponentIdx, ComponentInfo, Components};
 use crate::drop::DropFn;
 use crate::entity::{Entities, EntityId, EntityLocation};
@@ -29,6 +28,7 @@ use crate::prelude::World;
 use crate::sparse::SparseIndex;
 use crate::sparse_map::SparseMap;
 use crate::world::UnsafeWorldCell;
+use crate::{assume_unchecked, boxed_slice};
 
 /// Contains all the [`Archetype`]s and their metadata for a world.
 ///
@@ -58,11 +58,20 @@ pub struct ComponentIndices {
 }
 
 impl ComponentIndices {
+    /// Constructs a list of component indices from the given slice without
+    /// checking that it is sorted and deduplicated.
+    ///
+    /// # Safety
+    ///
+    /// The slice must be sorted in ascending order and deduplicated.
+    pub(crate) unsafe fn new_unchecked(slice: Box<[ComponentIdx]>) -> Self {
+        Self { slice }
+    }
+
     /// Returns an empty list of component indices.
-    pub(crate) fn empty() -> Self {
-        Self {
-            slice: Box::from([].as_slice()),
-        }
+    pub fn empty() -> Self {
+        // SAFETY: An empty slice is always sorted and deduplicated.
+        unsafe { Self::new_unchecked(Box::from([].as_slice())) }
     }
 
     /// Returns a list of component indices which contains all component
@@ -76,8 +85,13 @@ impl ComponentIndices {
         // sorted, so we insert the component index at that position.
         match self.binary_search(&component_index) {
             Ok(_) => self.clone(),
-            Err(position) => Self {
-                slice: boxed_slice::insert(&self, position, component_index),
+            Err(position) => unsafe {
+                // SAFETY: Inserting the component index at this position is
+                // guaranteed to maintain sorted order. If the component index
+                // were already contained in this list, we would have returned
+                // `self.clone()` in the match arm above, so this insertion
+                // cannot introduce duplicates.
+                Self::new_unchecked(boxed_slice::insert(&self, position, component_index))
             },
         }
     }
@@ -93,8 +107,10 @@ impl ComponentIndices {
         // index at that position.
         match self.binary_search(&component_index) {
             Err(_) => self.clone(),
-            Ok(position) => Self {
-                slice: boxed_slice::remove(&self, position),
+            Ok(position) => unsafe {
+                // SAFETY: Removing an element from a slice always maintains
+                // sorted order and cannot introduce duplicates.
+                Self::new_unchecked(boxed_slice::remove(&self, position))
             },
         }
     }
