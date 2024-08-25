@@ -58,6 +58,13 @@ pub struct ComponentIndices {
 }
 
 impl ComponentIndices {
+    /// Returns an empty list of component indices.
+    pub(crate) fn empty() -> Self {
+        Self {
+            slice: Box::from([].as_slice()),
+        }
+    }
+
     /// Returns a list of component indices which contains all component
     /// indices of `self`, as well as `component_index`. If `self` already
     /// contained the given component index, a clone of `self` is returned.
