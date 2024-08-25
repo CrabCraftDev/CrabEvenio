@@ -225,6 +225,12 @@ mod boxed_slice {
             let element = unsafe { *source.get_unchecked(0) };
             return vec![element; new_len].into_boxed_slice();
         }
+        
+        if new_len == 0 {
+            // If `new_len` is zero, we simply return an empty boxed slice. This
+            // does not actually allocate.
+            return Box::from([].as_slice());
+        }
 
         // Allocate the boxed slice which we will insert the element into.
         // TODO: Use Box::new_uninit_slice once it's stable.
