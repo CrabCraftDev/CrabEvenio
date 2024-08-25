@@ -120,6 +120,32 @@ mod boxed_slice {
     use core::mem::{transmute, MaybeUninit};
     use core::ptr::slice_from_raw_parts_mut;
 
+    /// Allocates an uninitialized slice using the global allocator.
+    /// 
+    /// # Safety
+    /// 
+    /// - `T` must not be zero-sized.
+    /// - `len` must not be zero.
+    // TODO: Use Box::new_uninit_slice instead once it's stable.
+    pub(crate) unsafe fn uninit<T>(len: usize) -> Box<[MaybeUninit<T>]> {
+        // Allocate the slice.
+        let target_layout = Layout::array::<T>(len).unwrap();
+        // SAFETY: The size of `target_layout` cannot be zero, as the caller
+        // guaranteed that `len` is non-zero and `T` is not zero-sized.
+        let pointer = unsafe { alloc(target_layout) };
+        if pointer.is_null() {
+            handle_alloc_error(target_layout);
+        }
+
+        // Make the allocation a boxed slice.
+        let pointer = pointer.cast::<MaybeUninit<T>>();
+        let pointer = slice_from_raw_parts_mut(pointer, len);
+        // SAFETY: We used the global allocator to allocate the correct layout
+        // (which is correct because `MaybeUninit<T>` and `T` have the same
+        // layout), so calling `Box::from_raw` here is fine.
+        unsafe { Box::from_raw(pointer) }
+    }
+
     /// Constructs a boxed slice which equals `source` with `element` inserted
     /// at `index`. This doesn't actually allocate if `T` is zero-sized.
     ///
@@ -153,23 +179,9 @@ mod boxed_slice {
         }
 
         // Allocate the boxed slice which we will insert the element into.
-        // TODO: Use Box::new_uninit_slice once it's stable.
-        let target_layout = Layout::array::<T>(new_len).unwrap();
-        // SAFETY: The size of `target_layout` cannot be zero, as `new_len` is
-        // guaranteed to be positive and we checked above that `T` is not
-        // zero-sized.
-        let pointer = unsafe { alloc(target_layout) };
-        if pointer.is_null() {
-            handle_alloc_error(target_layout);
-        }
-
-        // Make the allocation a boxed slice.
-        let pointer = pointer.cast::<MaybeUninit<T>>();
-        let pointer = slice_from_raw_parts_mut(pointer, new_len);
-        // SAFETY: We used the global allocator to allocate the correct layout
-        // (which is correct because `MaybeUninit<T>` and `T` have the same
-        // layout), so calling `Box::from_raw` here is fine.
-        let mut boxed = unsafe { Box::from_raw(pointer) };
+        // SAFETY: `new_len` is guaranteed to be positive and we checked above
+        // that `T` is not zero-sized.
+        let mut boxed = unsafe { uninit(new_len) };
 
         // Prepare the source slice by transmuting it from &[T] to
         // &[MaybeUninit<T>], so we can copy them into the uninitialized slice.
@@ -233,23 +245,9 @@ mod boxed_slice {
         }
 
         // Allocate the boxed slice which we will insert the element into.
-        // TODO: Use Box::new_uninit_slice once it's stable.
-        let target_layout = Layout::array::<T>(new_len).unwrap();
-        // SAFETY: The size of `target_layout` cannot be zero, as `new_len` is
-        // guaranteed to be positive and we checked above that `T` is not
-        // zero-sized.
-        let pointer = unsafe { alloc(target_layout) };
-        if pointer.is_null() {
-            handle_alloc_error(target_layout);
-        }
-
-        // Make the allocation a boxed slice.
-        let pointer = pointer.cast::<MaybeUninit<T>>();
-        let pointer = slice_from_raw_parts_mut(pointer, new_len);
-        // SAFETY: We used the global allocator to allocate the correct layout
-        // (which is correct because `MaybeUninit<T>` and `T` have the same
-        // layout), so calling `Box::from_raw` here is fine.
-        let mut boxed = unsafe { Box::from_raw(pointer) };
+        // SAFETY: We checked above that `new_len` is non-zero and that `T` is
+        // not zero-sized.
+        let mut boxed = unsafe { uninit(new_len) };
 
         // Prepare the source slice by transmuting it from &[T] to
         // &[MaybeUninit<T>], so we can copy them into the uninitialized slice.
