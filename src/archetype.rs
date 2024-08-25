@@ -16,7 +16,6 @@ use core::{fmt, mem, ptr, slice};
 use ahash::RandomState;
 use slab::Slab;
 
-use crate::aliased_box::AliasedBox;
 use crate::assume_unchecked;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
 use crate::drop::DropFn;
@@ -53,9 +52,9 @@ pub struct Archetypes {
 }
 
 /// A sorted, deduplicated list of component indices.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct ComponentIndices {
-    slice: AliasedBox<[ComponentIdx]>,
+    slice: Box<[ComponentIdx]>,
 }
 
 impl ComponentIndices {
@@ -71,7 +70,7 @@ impl ComponentIndices {
         match self.binary_search(&component_index) {
             Ok(_) => self.clone(),
             Err(position) => Self {
-                slice: boxed_slice::insert(&self, position, component_index).into(),
+                slice: boxed_slice::insert(&self, position, component_index),
             },
         }
     }
@@ -88,7 +87,7 @@ impl ComponentIndices {
         match self.binary_search(&component_index) {
             Err(_) => self.clone(),
             Ok(position) => Self {
-                slice: boxed_slice::remove(&self, position).into(),
+                slice: boxed_slice::remove(&self, position),
             },
         }
     }
@@ -102,7 +101,7 @@ impl ComponentIndices {
     /// `self` is dropped.
     pub(crate) unsafe fn as_ptr(&self) -> ComponentIndicesPtr {
         ComponentIndicesPtr {
-            ptr: AliasedBox::as_non_null(&self.slice),
+            ptr: &*self.slice as *const _,
         }
     }
 }
@@ -335,14 +334,6 @@ mod boxed_slice {
     }
 }
 
-impl Clone for ComponentIndices {
-    fn clone(&self) -> Self {
-        Self {
-            slice: AliasedBox::from(Box::from(&**self)),
-        }
-    }
-}
-
 // No BorrowMut implementation: that would allow aliased mutability via
 // `ComponentIndicesPtr`.
 impl Borrow<[ComponentIdx]> for ComponentIndices {
@@ -372,7 +363,7 @@ impl Deref for ComponentIndices {
 /// A non-null pointer to a sorted and deduplicated slice of component indices.
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct ComponentIndicesPtr {
-    ptr: NonNull<[ComponentIdx]>,
+    ptr: *const [ComponentIdx],
 }
 
 impl PartialEq for ComponentIndicesPtr {
@@ -397,10 +388,10 @@ impl Borrow<[ComponentIdx]> for ComponentIndicesPtr {
         // pointer does not outlive the `ComponentIndices` it references. Hence,
         // the slice must still be initialized at this point. We don't give out
         // mutable references to this slice anywhere, so aliasing rules are
-        // trivially followed. All other requirements (alignment,
-        // dereferenceability) for the call to `as_ref` are guaranteed by
-        // `as_ptr`'s implementation.
-        unsafe { self.ptr.as_ref() }
+        // trivially followed. All other requirements (alignment, non-null,
+        // dereferenceability) for the dereference are guaranteed by `as_ptr`'s
+        // implementation.
+        unsafe { &*self.ptr }
     }
 }
 
