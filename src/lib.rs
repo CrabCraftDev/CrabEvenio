@@ -16,6 +16,7 @@ pub mod archetype;
 mod bit_set;
 mod boxed_slice;
 pub mod component;
+pub mod component_indices;
 pub mod drop;
 pub mod entity;
 pub mod event;
