@@ -125,6 +125,12 @@ impl<T: Clone> Clone for AliasedBox<T> {
     }
 }
 
+impl<T: Clone> Clone for AliasedBox<[T]> {
+    fn clone(&self) -> Self {
+        Self::from(Box::from(self.as_ref()))
+    }
+}
+
 impl<T: ?Sized + PartialEq> PartialEq for AliasedBox<T> {
     fn eq(&self, other: &Self) -> bool {
         self.as_ref() == other.as_ref()
