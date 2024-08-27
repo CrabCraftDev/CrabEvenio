@@ -84,6 +84,9 @@ impl ComponentIndices {
     /// Returns a list of component indices which contains all component
     /// indices of `self`, as well as those of `other`.
     pub fn with_all(&self, other: &Self) -> Self {
+        // TODO: Explain and test this algorithm (and the algorithm used in
+        //  `without_all`).
+        
         match self[..] {
             [] => return other.clone(),
             [single] => return other.with(single),
