@@ -312,6 +312,7 @@ impl ComponentInfo {
 /// struct Username(String);
 ///
 /// // Component without data, known as a "marker" or "tag" component.
+/// #[derive(Component)]
 /// struct Invisible;
 ///
 /// // Derive it on structs with named fields.
