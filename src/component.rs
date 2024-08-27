@@ -10,6 +10,7 @@ use ahash::RandomState;
 pub use evenio_macros::Component;
 
 use crate::archetype::{Archetype, ArchetypeIdx};
+use crate::component_set_internals::ComponentSetInternal;
 use crate::drop::DropFn;
 use crate::entity::EntityLocation;
 use crate::event::{EventPtr, GlobalEvent, TargetedEventId};
@@ -419,6 +420,35 @@ unsafe impl SparseIndex for ComponentIdx {
         Self(u32::from_index(idx))
     }
 }
+
+/// A set of components.
+///
+/// On the type level, this functions as a set of component types, for example
+/// for removing all components of certain types from an entity, or for removing
+/// or inserting component types altogether.
+///
+/// On the value level, this functions as a set of component values, for example
+/// for inserting components into an entity or spawning an entity with initial
+/// components.
+///
+/// This trait is implemented for all components and tuples of components, so
+/// `C1`, `()`, `(C1,)`, `(C1, C2)` etc. are all component sets. Due to language
+/// limitations, these implementations only support tuples with up to 16
+/// elements. If you need a bigger component set, you can nest component sets:
+/// `((C1, C2), (C3, C4, C5), C6)` is also a component set.
+///
+/// This trait is sealed and cannot be implemented for types outside of this
+/// crate.
+// TODO: #[derive(ComponentSet)] akin to bevy's #[derive(Bundle)]? would require
+//  exposing at least some of the implementation details
+pub trait ComponentSet: 'static + ComponentSetInternal {
+    /// The number of components in the set.
+    fn len() -> usize {
+        Self::LEN
+    }
+}
+
+impl<C: ComponentSetInternal + 'static> ComponentSet for C {}
 
 /// An event sent immediately after a new component is added to the world.
 /// Contains the ID of the added component.
