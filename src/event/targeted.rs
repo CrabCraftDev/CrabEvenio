@@ -260,8 +260,8 @@ impl TargetedEventInfo {
     }
 
     /// Gets the [`EventKind`] of the event.
-    pub fn kind(&self) -> EventKind {
-        self.kind
+    pub fn kind(&self) -> &EventKind {
+        &self.kind
     }
 
     /// Gets the [`TypeId`] of the event, if any.

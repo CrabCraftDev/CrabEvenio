@@ -7,6 +7,7 @@ use core::any::{self, TypeId};
 use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem;
+use core::mem::offset_of;
 use core::ptr::NonNull;
 
 use bumpalo::Bump;
@@ -14,16 +15,18 @@ use bumpalo::Bump;
 use crate::access::ComponentAccess;
 use crate::archetype::Archetypes;
 use crate::component::{
-    AddComponent, Component, ComponentDescriptor, ComponentId, ComponentInfo, Components,
-    RemoveComponent,
+    AddComponent, Component, ComponentDescriptor, ComponentId, ComponentInfo, ComponentSet,
+    Components, RemoveComponent,
 };
+use crate::component_indices::ComponentIndices;
+use crate::component_set_internals::ComponentPointerConsumer;
 use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{Entities, EntityId, EntityLocation, ReservedEntities};
 use crate::event::{
     AddGlobalEvent, AddTargetedEvent, Despawn, EventDescriptor, EventKind, EventMeta, EventPtr,
-    EventQueueItem, GlobalEvent, GlobalEventId, GlobalEventIdx, GlobalEventInfo, GlobalEvents,
-    Insert, Remove, RemoveGlobalEvent, RemoveTargetedEvent, Spawn, TargetedEvent, TargetedEventId,
-    TargetedEventIdx, TargetedEventInfo, TargetedEvents,
+    EventQueueItem, GetComponentsFn, GlobalEvent, GlobalEventId, GlobalEventIdx, GlobalEventInfo,
+    GlobalEvents, Insert, Remove, RemoveGlobalEvent, RemoveTargetedEvent, Spawn, TargetedEvent,
+    TargetedEventId, TargetedEventIdx, TargetedEventInfo, TargetedEvents,
 };
 use crate::handler::{
     AddHandler, Handler, HandlerConfig, HandlerId, HandlerInfo, HandlerInfoInner, HandlerList,
@@ -179,6 +182,7 @@ impl World {
         id
     }
 
+    // TODO: Document batch component insertion and removal.
     /// Sends the [`Insert`] event.
     ///
     /// This is equivalent to:
@@ -195,10 +199,10 @@ impl World {
     /// #
     /// # let component = C;
     /// #
-    /// world.send_to(entity, Insert(component));
+    /// world.send_to(entity, Insert::new(component));
     /// ```
-    pub fn insert<C: Component>(&mut self, entity: EntityId, component: C) {
-        self.send_to(entity, Insert(component))
+    pub fn insert<C: ComponentSet>(&mut self, entity: EntityId, components: C) {
+        self.send_to(entity, Insert::new(components))
     }
 
     /// Sends the [`Remove`] event.
@@ -504,6 +508,7 @@ impl World {
         Some(info)
     }
 
+    // TODO: Add and remove sets of components.
     /// Adds the component `C` to the world, returns its [`ComponentId`], and
     /// sends the [`AddComponent`] event to signal its creation.
     ///
@@ -767,21 +772,29 @@ impl World {
         &mut self,
         desc: EventDescriptor,
     ) -> TargetedEventId {
-        let kind = desc.kind;
-
         let (id, is_new) = self.targeted_events.add(desc);
+
+        // SAFETY: We just added the event.
+        let kind = self.targeted_events.get(id).unwrap_unchecked().kind();
 
         if is_new {
             match kind {
                 EventKind::Normal => {}
-                EventKind::Insert { component_idx } => {
-                    if let Some(info) = self.components.get_by_index_mut(component_idx) {
-                        info.insert_events.insert(id);
+                EventKind::Insert {
+                    component_indices,
+                    permutation: _,
+                } => {
+                    for &component_idx in component_indices {
+                        if let Some(info) = self.components.get_by_index_mut(component_idx) {
+                            info.insert_events.insert(id);
+                        }
                     }
                 }
-                EventKind::Remove { component_idx } => {
-                    if let Some(info) = self.components.get_by_index_mut(component_idx) {
-                        info.remove_events.insert(id);
+                EventKind::Remove { component_indices } => {
+                    for &component_idx in component_indices {
+                        if let Some(info) = self.components.get_by_index_mut(component_idx) {
+                            info.remove_events.insert(id);
+                        }
                     }
                 }
                 EventKind::Spawn => {}
@@ -901,14 +914,21 @@ impl World {
 
         match info.kind() {
             EventKind::Normal => {}
-            EventKind::Insert { component_idx } => {
-                if let Some(info) = self.components.get_by_index_mut(component_idx) {
-                    info.insert_events.remove(&event);
+            EventKind::Insert {
+                component_indices,
+                permutation: _,
+            } => {
+                for &component_idx in component_indices {
+                    if let Some(info) = self.components.get_by_index_mut(component_idx) {
+                        info.insert_events.remove(&event);
+                    }
                 }
             }
-            EventKind::Remove { component_idx } => {
-                if let Some(info) = self.components.get_by_index_mut(component_idx) {
-                    info.remove_events.remove(&event);
+            EventKind::Remove { component_indices } => {
+                for &component_idx in component_indices {
+                    if let Some(info) = self.components.get_by_index_mut(component_idx) {
+                        info.remove_events.remove(&event);
+                    }
                 }
             }
             EventKind::Spawn => {}
@@ -1038,7 +1058,7 @@ impl World {
             let (mut ctx, event_kind, handlers, target_location) = match item.meta {
                 EventMeta::Global { idx } => {
                     let info = unsafe { self.global_events.get_by_index(idx).unwrap_unchecked() };
-                    let kind = info.kind();
+                    let kind: *const _ = info.kind();
                     let handlers: *const [_] =
                         unsafe { self.handlers.get_global_list(idx).unwrap_unchecked() }.slice();
                     let ctx = EventDropper::new(item.event, info.drop(), self);
@@ -1049,7 +1069,7 @@ impl World {
                 }
                 EventMeta::Targeted { idx, target } => {
                     let info = unsafe { self.targeted_events.get_by_index(idx).unwrap_unchecked() };
-                    let kind = info.kind();
+                    let kind: *const _ = info.kind();
                     let ctx = EventDropper::new(item.event, info.drop(), self);
 
                     let Some(location) = ctx.world.entities.get(target) else {
@@ -1110,12 +1130,15 @@ impl World {
                     .reverse()
             };
 
-            match event_kind {
+            match unsafe { &*event_kind } {
                 EventKind::Normal => {
                     // Ordinary event. Run drop fn.
                     unsafe { ctx.drop_event() };
                 }
-                EventKind::Insert { component_idx } => {
+                EventKind::Insert {
+                    component_indices,
+                    permutation,
+                } => {
                     debug_assert_ne!(target_location, EntityLocation::NULL);
 
                     let src_arch = ctx
@@ -1123,7 +1146,8 @@ impl World {
                         .archetypes()
                         .get(target_location.archetype)
                         .unwrap();
-                    let dst_component_indices = src_arch.component_indices().with(component_idx);
+                    let dst_component_indices =
+                        src_arch.component_indices().with_all(&component_indices);
                     let dst = unsafe {
                         ctx.world.archetypes.create_archetype(
                             dst_component_indices,
@@ -1132,14 +1156,99 @@ impl World {
                         )
                     };
 
-                    // `Insert<C>` is `repr(transparent)`.
-                    let component_ptr = ctx.event.as_ptr().cast_const();
+                    // We now need to get pointers to the inserted components.
+                    // This is challenging because the `Insert` event is generic
+                    // over `C`, the `ComponentSet` of components to be
+                    // inserted. We do not know `C` here, we only have a
+                    // type-erased pointer to the event. Still, we need to call
+                    // `C::get_components` with a pointer to the component set,
+                    // somehow.
+                    //
+                    // The first challenge is knowing which `get_components`
+                    // function we need to call. We do this by storing a pointer
+                    // to this function in the event itself. This is unusual,
+                    // but necessary here. This function pointer is kind of like
+                    // a tiny vtable, but only for one method.
+                    //
+                    // The second challenge is knowing where our component set
+                    // even is - we need a pointer to it so we can pass it to
+                    // `get_components`. Normally, one would simply write
+                    // `&event.components`. But this doesn't work, as it
+                    // requires `event` to have a known type: `Insert<C>`. We
+                    // don't know `C`, so we don't know where the `components`
+                    // field is located - nor where the other fields are!
+                    //
+                    // Thankfully, `#[repr(C)]` comes to the rescue. It
+                    // guarantees that all fields are stored in order of
+                    // declaration, with the necessary padding to align them.
+                    // This means we can simply store the generic field,
+                    // `components: C`, in last place. The offsets of the other
+                    // fields won't be affected by `C`'s unknown size.
+                    //
+                    // However, we *still* don't know where the `components`
+                    // field is. The problem is `C`'s alignment: Depending on
+                    // the alignment, Rust will add padding before the field,
+                    // so the `components` field's offset actually depends on
+                    // `C`. We work around this by also storing this field
+                    // offset in the struct.
 
+                    // The offset of the `get_components` field. Since `Insert`
+                    // is `repr(C)` and the `components` field is last, the
+                    // offset of this field does not depend on `C`, so we pass
+                    // `()` as `Insert`'s type parameter to be able to use the
+                    // `offset_of` macro.
+                    let get_components_field_offset = offset_of!(Insert<()>, get_components);
+
+                    // The offset of the `components_offset` field.
+                    let components_offset_field_offset = offset_of!(Insert<()>, components_offset);
+
+                    // Sanity check that we can safely read from these fields.
+                    fn assert_copy<T: Copy>() {}
+
+                    assert_copy::<GetComponentsFn>();
+                    assert_copy::<usize>();
+
+                    // Read the function pointer to the component set's
+                    // `get_components` method from the struct.
+                    let get_components: GetComponentsFn = unsafe {
+                        ctx.event
+                            .byte_add(get_components_field_offset)
+                            .cast()
+                            .read()
+                    };
+
+                    // Read the offset of the `components` field from the
+                    // struct.
+                    let components_offset: usize = unsafe {
+                        ctx.event
+                            .byte_add(components_offset_field_offset)
+                            .cast()
+                            .read()
+                    };
+
+                    // Compute a pointer to the `components` field using this
+                    // offset.
+                    let components_ptr: *const u8 =
+                        unsafe { ctx.event.byte_add(components_offset).cast().as_ptr() };
+
+                    // Create a `ComponentPointerConsumer` with the event's
+                    // permutation to sort the collected component pointers.
+                    let mut consumer = ComponentPointerConsumer::new(&permutation);
+
+                    // Collect the component pointers.
+                    unsafe { get_components(components_ptr, &mut consumer) };
+
+                    // Unpack the consumer to get the pointers.
+                    let component_pointers = unsafe { consumer.into_pointers_unchecked() };
+
+                    // Finally, move the entity to the destination archetype,
+                    // passing the component pointers.
                     unsafe {
                         ctx.world.archetypes.move_entity(
                             target_location,
                             dst,
-                            [(component_idx, component_ptr)],
+                            component_indices,
+                            &component_pointers,
                             &mut ctx.world.entities,
                         )
                     };
@@ -1148,12 +1257,13 @@ impl World {
                     // in case one of the above functions panics.
                     ctx.unpack();
                 }
-                EventKind::Remove { component_idx } => {
+                EventKind::Remove { component_indices } => {
                     // `Remove` doesn't need drop.
                     let _ = ctx.unpack();
 
                     let src_arch = self.archetypes().get(target_location.archetype).unwrap();
-                    let dst_component_indices = src_arch.component_indices().without(component_idx);
+                    let dst_component_indices =
+                        src_arch.component_indices().without_all(component_indices);
                     let dst = unsafe {
                         self.archetypes.create_archetype(
                             dst_component_indices,
@@ -1163,8 +1273,13 @@ impl World {
                     };
 
                     unsafe {
-                        self.archetypes
-                            .move_entity(target_location, dst, [], &mut self.entities)
+                        self.archetypes.move_entity(
+                            target_location,
+                            dst,
+                            &ComponentIndices::empty(),
+                            &[],
+                            &mut self.entities,
+                        )
                     };
                 }
                 EventKind::Spawn => {

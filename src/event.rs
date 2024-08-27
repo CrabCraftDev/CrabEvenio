@@ -4,9 +4,12 @@ mod global;
 mod targeted;
 
 use alloc::borrow::Cow;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use core::alloc::Layout;
 use core::any::TypeId;
 use core::marker::PhantomData;
+use core::mem::{offset_of, transmute};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{any, fmt, slice, str};
@@ -17,12 +20,16 @@ pub use targeted::*;
 
 use crate::access::Access;
 use crate::archetype::Archetype;
-use crate::component::ComponentIdx;
+use crate::component::ComponentSet;
+use crate::component_indices::ComponentIndices;
+#[allow(unused_imports)] // `ComponentSetInternal` import used in docs
+use crate::component_set_internals::{ComponentPointerConsumer, ComponentSetInternal};
 use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{EntityId, EntityLocation};
 use crate::fetch::FetcherState;
 use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam, InitError};
 use crate::mutability::{Immutable, Mutability, MutabilityMarker, Mutable};
+use crate::permutation::Permutation;
 use crate::prelude::Component;
 use crate::query::Query;
 use crate::world::{UnsafeWorldCell, World};
@@ -83,7 +90,7 @@ pub unsafe trait Event {
 
 /// Additional behaviors for an event. This is used to distinguish normal
 /// user events from special built-in events.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug)]
 #[non_exhaustive]
 pub enum EventKind {
     /// An event not covered by one of the other variants. Events of this kind
@@ -92,13 +99,16 @@ pub enum EventKind {
     Normal,
     /// The [`Insert`] event.
     Insert {
-        /// The [`ComponentIdx`] of the component to insert.
-        component_idx: ComponentIdx,
+        /// The [`ComponentIndices`] of the components to insert.
+        component_indices: ComponentIndices,
+        /// Implementation detail. Permutation used to sort the underlying
+        /// component set.
+        permutation: Permutation,
     },
     /// The [`Remove`] event.
     Remove {
-        /// The [`ComponentIdx`] of the component to remove.
-        component_idx: ComponentIdx,
+        /// The [`ComponentIndices`] of the components to remove.
+        component_indices: ComponentIndices,
     },
     /// The [`Spawn`] event.
     Spawn,
@@ -717,7 +727,7 @@ impl<'a, ES: EventSet> Sender<'a, ES> {
     /// # use evenio::prelude::*;
     /// # #[derive(Component)] struct C;
     /// # fn _f(sender: &mut Sender<Insert<C>>, target: EntityId, component: C) {
-    /// sender.send_to(target, Insert(component));
+    /// sender.send_to(target, Insert::new(component));
     /// # }
     /// ```
     ///
@@ -725,8 +735,8 @@ impl<'a, ES: EventSet> Sender<'a, ES> {
     ///
     /// Panics if `Insert<C>` is not in the [`EventSet`] of this sender.
     #[track_caller]
-    pub fn insert<C: Component>(&self, target: EntityId, component: C) {
-        self.send_to(target, Insert(component))
+    pub fn insert<C: ComponentSet>(&self, target: EntityId, components: C) {
+        self.send_to(target, Insert::new(components))
     }
 
     /// Queue a [`Remove`] event.
@@ -966,17 +976,118 @@ macro_rules! impl_event_set_tuple {
 
 all_tuples!(impl_event_set_tuple, 0, 64, E, e);
 
-/// A [`TargetedEvent`] which adds component `C` on an entity when sent. If the
-/// entity already has the component, then the component is replaced.
+/// Adds all components of a set to a world and sorts their component indices.
+/// Returns a tuple of the permutation used to sort the indices and the indices
+/// themselves, or `Err(())` if any component index appeared twice.
+fn initialize_component_set<C: ComponentSet>(
+    world: &mut World,
+) -> Result<(Permutation, ComponentIndices), ()> {
+    /// Returns `true` if the given sorted slice contains any duplicates. This
+    /// function assumes that `a == b` if and only if `a` and `b` are adjacent
+    /// in the slice. If this condition is violated, the function will
+    /// return a meaningless result, but not cause undefined behaviour.
+    fn sorted_slice_contains_duplicates<T: PartialEq>(slice: &[T]) -> bool {
+        // TODO: Use `slice.array_windows().any(|[a, b]| a == b)` once
+        //  `[T]::array_windows` is stabilized.
+        for i in 0..slice.len() - 1 {
+            let this = &slice[i];
+            let next = &slice[i + 1];
+            if this == next {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Add the components to the world and collect their indices.
+    let mut unsorted_component_indices = Vec::with_capacity(C::len());
+    C::add_components(world, &mut unsorted_component_indices);
+
+    // Compute a permutation to sort the indices.
+    let permutation = Permutation::sorting(&unsorted_component_indices);
+
+    // Apply the permutation, sorting the indices.
+    let component_indices = permutation.apply_collect(unsorted_component_indices);
+    debug_assert!(component_indices.is_sorted());
+
+    // Check if there are any duplicates.
+    if sorted_slice_contains_duplicates(&component_indices) {
+        Err(())
+    } else {
+        // SAFETY: We just sorted `component_indices` and checked that it does
+        // not contain duplicates.
+        let component_indices = unsafe { ComponentIndices::new_unchecked(component_indices) };
+
+        // Return the permutation and the component indices.
+        Ok((permutation, component_indices))
+    }
+}
+
+/// A [`TargetedEvent`] which adds all components of a set `C` on an entity when
+/// sent. If the entity already has a component, then the component is
+/// replaced.
 ///
-/// Any handler which listens for `Insert<C>` will run before the component is
+/// Any handler which listens for `Insert<C>` will run before the components are
 /// inserted. `Insert<C>` has no effect if the target entity does not exist or
 /// the event is consumed before it finishes broadcasting.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[repr(transparent)]
-pub struct Insert<C>(pub C);
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[repr(C)]
+// NOTE: Unsafe code relies on `#[repr(C)]` and the field order.
+pub struct Insert<C> {
+    /// A type-erased function pointer to the [`get_components`] function of
+    /// `C`. Used for calling `get_components` when the type of `C` is unknown.
+    ///
+    /// [`get_components`]: [`ComponentSetInternal::get_components`]
+    // TODO: Move this field to EventKind::Insert, simplifying things a lot.
+    pub(crate) get_components: GetComponentsFn,
 
-unsafe impl<C: Component> Event for Insert<C> {
+    /// The offset of the [`components`] field of this struct, in bytes. Depends
+    /// on the alignment of `C`, since padding is added before the `components`
+    /// field to ensure it is properly aligned. Used for computing a pointer to
+    /// the `components` field when the type of `C` is unknown.
+    pub(crate) components_offset: usize,
+
+    /// The components inserted by this event.
+    pub components: C,
+}
+
+/// Mirrors the signature of [`C::get_components`].
+///
+/// [`C::get_components`]: [`ComponentSetInternal::get_components`]
+type TypedGetComponentsFn<C> = fn(set: &C, out: &mut ComponentPointerConsumer);
+
+/// A type-erased function pointer matching the signature of
+/// [`ComponentSetInternal::get_components`]. Callers of this function pointer
+/// must ensure that `set_ptr` points to a component set of the correct type.
+pub(crate) type GetComponentsFn = unsafe fn(set_ptr: *const u8, out: &mut ComponentPointerConsumer);
+
+/// Returns a type-erased function pointer to `C::get_components`.
+fn get_components_fn_of<C: ComponentSet>() -> GetComponentsFn {
+    // Ensure that `get_components` has the signature we expect.
+    let f: TypedGetComponentsFn<C> = C::get_components;
+
+    // Cast the function pointer.
+    // SAFETY: The signatures of `TypedGetComponentsFn` and `GetComponentsFn`
+    // are compatible, as they only differ in their first argument and
+    // it is safe to pass `*const u8` where `&C` is expected, as long as the
+    // pointee type matches and the lifetime is correct.
+    unsafe { transmute(f) }
+}
+
+impl<C: ComponentSet> Insert<C> {
+    /// Constructs a new [`Insert`] event for the given component set.
+    // RustRover's borrow checker inspection doesn't understand offset_of
+    // noinspection RsBorrowChecker
+    pub fn new(components: C) -> Self {
+        Self {
+            get_components: get_components_fn_of::<C>(),
+            components_offset: offset_of!(Self, components),
+            components,
+        }
+    }
+}
+
+unsafe impl<C: ComponentSet> Event for Insert<C> {
     type This<'a> = Insert<C>;
 
     type EventIdx = TargetedEventIdx;
@@ -984,8 +1095,12 @@ unsafe impl<C: Component> Event for Insert<C> {
     type Mutability = Mutable;
 
     fn init(world: &mut World) -> EventKind {
+        let Ok((permutation, component_indices)) = initialize_component_set::<C>(world) else {
+            panic!("component set contains duplicates");
+        };
         EventKind::Insert {
-            component_idx: world.add_component::<C>().index(),
+            component_indices,
+            permutation,
         }
     }
 }
@@ -994,20 +1109,20 @@ impl<C> Deref for Insert<C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.components
     }
 }
 
 impl<C> DerefMut for Insert<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.components
     }
 }
 
-/// A [`TargetedEvent`] which removes component `C` from an entity when sent.
-/// The component is dropped and cannot be recovered.
+/// A [`TargetedEvent`] which removes all components in the set `C` from an
+/// entity when sent. The components are dropped and cannot be recovered.
 ///
-/// Any handler which listens for `Remove<C>` will run before the component is
+/// Any handler which listens for `Remove<C>` will run before the components are
 /// removed. `Remove<C>` has no effect if the target entity does not exist or
 /// the event is consumed before it finishes broadcasting.
 ///
@@ -1057,7 +1172,7 @@ impl<C: ?Sized> fmt::Debug for Remove<C> {
     }
 }
 
-unsafe impl<C: Component> Event for Remove<C> {
+unsafe impl<C: ComponentSet> Event for Remove<C> {
     type This<'a> = Remove<C>;
 
     type EventIdx = TargetedEventIdx;
@@ -1065,9 +1180,10 @@ unsafe impl<C: Component> Event for Remove<C> {
     type Mutability = Mutable;
 
     fn init(world: &mut World) -> EventKind {
-        EventKind::Remove {
-            component_idx: world.add_component::<C>().index(),
-        }
+        let Ok((_permutation, component_indices)) = initialize_component_set::<C>(world) else {
+            panic!("component set contains duplicates");
+        };
+        EventKind::Remove { component_indices }
     }
 }
 

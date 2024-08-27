@@ -25,6 +25,7 @@ pub mod fetch;
 pub mod handler;
 mod ignore;
 mod map;
+mod maybe_infinite;
 pub mod mutability;
 mod permutation;
 pub mod query;

@@ -5,10 +5,9 @@ use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::alloc::Layout;
-use core::borrow::Borrow;
-use core::cmp::Ordering;
-use core::hash::{Hash, Hasher};
-use core::ops::{Deref, Index};
+use core::hash::Hash;
+use core::mem::transmute;
+use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr::NonNull;
 use core::{fmt, mem, ptr, slice};
@@ -16,7 +15,9 @@ use core::{fmt, mem, ptr, slice};
 use ahash::RandomState;
 use slab::Slab;
 
+use crate::assume_unchecked;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
+use crate::component_indices::{ComponentIndices, ComponentIndicesPtr};
 use crate::drop::DropFn;
 use crate::entity::{Entities, EntityId, EntityLocation};
 use crate::event::{EventId, EventPtr, TargetedEventIdx};
@@ -28,7 +29,6 @@ use crate::prelude::World;
 use crate::sparse::SparseIndex;
 use crate::sparse_map::SparseMap;
 use crate::world::UnsafeWorldCell;
-use crate::{assume_unchecked, boxed_slice};
 
 /// Contains all the [`Archetype`]s and their metadata for a world.
 ///
@@ -259,29 +259,37 @@ impl Archetypes {
     }
 
     /// Moves an entity from one archetype to another. Returns the entity's row
-    /// in the new archetype. The `new_components` iterator is expected to yield
-    /// pairs of every component index that is contained in the component
-    /// indices of the destination, but not the source archetype, along with a
-    /// valid pointer to a component of the type that corresponds to that
-    /// component index.
-    /// 
+    /// in the new archetype.
+    ///
+    /// - For each column present only in the source archetype, the entity's
+    ///   component will be removed.
+    /// - For each column present in both archetypes, the entity's component
+    ///   will be moved, unless a new component for the column's component index
+    ///   was provided. Then, the old component will be removed and the new
+    ///   component will be added to the destination column
+    /// - For each column present only in the destination archetype, a new
+    ///   component of the column's component index must be provided and will be
+    ///   inserted into the column.
+    ///
+    /// New components can be provided via the `new_component_indices` and
+    /// `new_component_pointers` parameters. The parameters must have the same
+    /// length, and at each index `i`, `new_component_pointers[i]` must point
+    /// to a valid component for the component index `new_component_indices[i]`.
+    ///
     /// # Safety
-    /// 
+    ///
     /// - `src` must be valid.
     /// - `dst` must be valid.
-    /// - `new_components` must fulfill the requirements stated above.
-    // NOTE: As of now, this function is never called with more than one new
-    // component. Still, its implementation seems to already support bulk
-    // insertion / removal of components.
+    /// - `new_component_indices` and `new_component_pointers` must fulfill the
+    ///   requirements stated above.
     pub(crate) unsafe fn move_entity(
         &mut self,
         src: EntityLocation,
         dst: ArchetypeIdx,
-        new_components: impl IntoIterator<Item = (ComponentIdx, *const u8)>,
+        new_component_indices: &ComponentIndices,
+        new_component_pointers: &[*const u8],
         entities: &mut Entities,
     ) -> ArchetypeRow {
-        let mut new_components = new_components.into_iter();
-
         // If the source and destination archetypes are equal, the entity does
         // not need to be moved. Instead, we reassign the components.
         if src.archetype == dst {
@@ -290,7 +298,7 @@ impl Archetypes {
                 .get_mut(src.archetype.0 as usize)
                 .unwrap_unchecked();
 
-            for (comp_idx, comp_ptr) in new_components {
+            for (&comp_idx, &comp_ptr) in new_component_indices.iter().zip(new_component_pointers) {
                 let col = arch.column_of_mut(comp_idx).unwrap_unchecked();
 
                 // Replace the old component with the new component of the same
@@ -311,6 +319,7 @@ impl Archetypes {
         // Reserve space for the moved entity in the destination archetype.
         let dst_arch_reallocated = dst_arch.reserve_one();
 
+        // TODO: Remove these old and drafty notes after a commit.
         // Update components of each component index:
         // - If the source has a column for the index, but the destination does not,
         //   remove the moved entity's component from that column.
@@ -322,7 +331,7 @@ impl Archetypes {
         //   destination column.
         //
         // The algorithm used to achieve this for every relevant component index
-        // uses a loop, in which two indices, `src_idx` and `dst_idx` are
+        // uses a loop, in which two indices, `src_idx` and `dst_idx`, are
         // gradually incremented. These are indices into simultaneously the
         // `component_indices` and `columns` slices of the source and
         // destination archetypes, respectively. To differentiate them from the
@@ -395,131 +404,367 @@ impl Archetypes {
         // incrementing it; we are, however, finished with processing `dst_idx`
         // one, so we increment that. This leaves us with both column indices
         // out of bounds in the next iteration, so we break the loop.
+        /*
 
-        // Both column indices start at zero.
-        let mut src_idx = 0;
-        let mut dst_idx = 0;
+        ABC -> BCD with CD
 
-        loop {
-            // Check if the column indices are in bounds.
-            let src_in_bounds = src_idx < src_arch.component_indices.len();
-            let dst_in_bounds = dst_idx < dst_arch.component_indices.len();
+        src A B C
+        dst B C D
+        new C D
 
-            match (src_in_bounds, dst_in_bounds) {
-                (true, true) => {
-                    // Both column indices are in bounds. Compare the
-                    // corresponding component indices to find out if they
-                    // match, if there is a source column with no matching
-                    // destination column or if there is a destination column
-                    // with no matching source column.
+        src <<, removing A
 
-                    let src_comp_idx = *src_arch.component_indices.get_unchecked(src_idx);
-                    let dst_comp_idx = *dst_arch.component_indices.get_unchecked(dst_idx);
+        src B C
+        dst B C D
+        new C D
 
-                    match src_comp_idx.cmp(&dst_comp_idx) {
-                        Ordering::Less => {
-                            // The source component index is less than the
-                            // destination component index, so we will not
-                            // encounter a matching destination column to
-                            // transfer a component to. Remove the entity's
-                            // component from the source column.
+        src, dst <<, moving B
 
-                            // Remove the old component from the source column.
-                            let src_col = &mut *src_arch.columns.as_ptr().add(src_idx);
-                            src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
+        src C
+        dst C D
+        new C D
 
-                            // Increment the source column index only, as we
-                            // haven't handled the destination column at the
-                            // current destination column index yet.
-                            src_idx += 1;
-                        }
-                        Ordering::Equal => {
-                            // The source archetype has a component index that
-                            // the destination archetype also has. This means we
-                            // can transfer the old component at that component
-                            // index from the source to the destination.
+        src, dst, new <<, replacing C
 
-                            let src_col = &mut *src_arch.columns.as_ptr().add(src_idx);
-                            let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
+        src -
+        dst D
+        new D
 
-                            // Transfer the component.
-                            src_col.transfer_elem(
-                                src_arch.entity_ids.len(),
-                                dst_col,
-                                dst_arch.entity_ids.len(),
-                                src.row.0 as usize,
-                            );
+        dst, new <<, adding D
 
-                            // Increment both column indices, as the transfer
-                            // operation handled both the source and the
-                            // destination columns at their respective current
-                            // indices.
-                            src_idx += 1;
-                            dst_idx += 1;
-                        }
-                        Ordering::Greater => {
-                            // The destination component index is less than the
-                            // source component index, so we will not encounter
-                            // a matching source column to transfer a component
-                            // from. Add a new component to the destination
-                            // column from the `new_components` iterator.
+        src -
+        dst -
+        new -
 
-                            let (component_idx, component_ptr) =
-                                new_components.next().unwrap_unchecked();
+        done
 
-                            let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
 
-                            let dst_comp_idx = *dst_arch.component_indices.get_unchecked(dst_idx);
+        patterns:
 
-                            debug_assert_eq!(component_idx, dst_comp_idx);
+        src X
+        dst Y
+        new *
 
-                            let dst_ptr = dst_col
-                                .data
-                                .as_ptr()
-                                .add(dst_col.component_layout.size() * dst_arch.entity_ids.len());
+        => remove X, shift src
 
-                            // Insert the new component into the destination
-                            // column.
-                            ptr::copy_nonoverlapping(
-                                component_ptr,
-                                dst_ptr,
-                                dst_col.component_layout.size(),
-                            );
+        src X
+        dst X
+        new Y
 
-                            // Increment the destination column index only, as
-                            // we haven't handled the source column at the
-                            // current source column index yet.
-                            dst_idx += 1;
-                        }
+        => move X, shift src, dst
+
+        src X
+        dst X
+        new X
+
+        => replace X, shift src, dst, new
+
+        src Y
+        dst X
+        new X
+
+        => add X, shift dst, new
+
+        src Y
+        dst X
+        new Y
+
+        => error
+
+        src Y
+        dst X
+        new Z
+
+        => error
+
+
+        patterns (variant):
+
+        src < dst
+
+        => remove X, shift src
+
+        src == dst < new
+
+        => move X, shift src, dst
+
+        src == dst == new
+
+        => replace X, shift src, dst, new
+
+        src == dst > new
+
+        => error: excess new
+
+        src > dst > new
+
+        => error: excess new
+
+        src > dst == new
+
+        => add X, shift dst, new
+
+        src > dst < new
+
+        => error: missing new
+
+         */
+
+        mod handle_components {
+            //! Removing, transferring, replacing and adding components while
+            //! moving an entity is a complicated process. This unusual little
+            //! module embedded in a function is intended to bring structure to
+            //! the algorithm.
+            // TODO: Add a detailed explanation and more documentation below.
+
+            use core::cmp::Ordering::*;
+
+            use NewComponentState::*;
+            use OldComponentState::*;
+            use ProcessState::*;
+
+            use crate::component_indices::ComponentIndices;
+
+            /// Information and recommendations for action based on a comparison
+            /// of the component indices of the current source and
+            /// destination columns.
+            pub(super) enum OldComponentState {
+                /// Because we will not find a matching destination column to
+                /// transfer the old component to or to add a new component to.
+                RemoveFromSource,
+                /// Because the source and destination columns store components
+                /// of the same type.
+                TransferOrReplace,
+                /// Because we will not find a matching source column to
+                /// transfer an old component from.
+                OldComponentUnavailable,
+            }
+
+            /// Information and recommendations for action based on a comparison
+            /// of the component indices of the current destination
+            /// column and the current new component pointer.
+            pub(super) enum NewComponentState {
+                /// Because we will not find a new component we can place into
+                /// this destination column.
+                NewComponentUnavailable,
+                /// Because the new component can be placed into the destination
+                /// column.
+                AddNew,
+                /// Because we will not find a destination column we can place
+                /// this new component into.
+                ExcessNew,
+            }
+
+            /// The state of a [`Process`].
+            pub(super) enum ProcessState {
+                /// The process is in progress.
+                InProgress(OldComponentState, NewComponentState),
+                /// The process is finished, but there are new components left
+                /// over.
+                DoneWithExcessNew,
+                /// The process is finished.
+                Done,
+            }
+
+            pub(super) struct Process<'a> {
+                src_idx: usize,
+                dst_idx: usize,
+                new_idx: usize,
+                src_component_indices: &'a ComponentIndices,
+                dst_component_indices: &'a ComponentIndices,
+                new_component_indices: &'a ComponentIndices,
+            }
+
+            impl<'a> Process<'a> {
+                #[inline]
+                pub(super) fn new(
+                    src_component_indices: &'a ComponentIndices,
+                    dst_component_indices: &'a ComponentIndices,
+                    new_component_indices: &'a ComponentIndices,
+                ) -> Self {
+                    Self {
+                        src_idx: 0,
+                        dst_idx: 0,
+                        new_idx: 0,
+                        src_component_indices,
+                        dst_component_indices,
+                        new_component_indices,
                     }
                 }
-                (true, false) => {
-                    // The destination column index is out of bounds, so we will
-                    // not encounter a destination column to transfer a
-                    // component to. Remove the entity's component from the
-                    // source column.
 
-                    // Remove the old component from the source column.
-                    let src_col = &mut *src_arch.columns.as_ptr().add(src_idx);
+                #[inline]
+                pub(super) fn state(&self) -> ProcessState {
+                    let src_component_index = self.src_component_indices.get(self.src_idx).copied();
+                    let dst_component_index = self.dst_component_indices.get(self.dst_idx).copied();
+                    let new_component_index = self.new_component_indices.get(self.new_idx).copied();
+
+                    match (
+                        src_component_index,
+                        dst_component_index,
+                        new_component_index,
+                    ) {
+                        (
+                            Some(src_component_index),
+                            Some(dst_component_index),
+                            Some(new_component_index),
+                        ) => InProgress(
+                            match src_component_index.cmp(&dst_component_index) {
+                                Less => RemoveFromSource,
+                                Equal => TransferOrReplace,
+                                Greater => OldComponentUnavailable,
+                            },
+                            match dst_component_index.cmp(&new_component_index) {
+                                Less => NewComponentUnavailable,
+                                Equal => AddNew,
+                                Greater => ExcessNew,
+                            },
+                        ),
+                        (Some(src_component_index), Some(dst_component_index), None) => InProgress(
+                            match src_component_index.cmp(&dst_component_index) {
+                                Less => RemoveFromSource,
+                                Equal => TransferOrReplace,
+                                Greater => OldComponentUnavailable,
+                            },
+                            NewComponentUnavailable,
+                        ),
+                        (Some(_), None, Some(_)) => InProgress(RemoveFromSource, ExcessNew),
+                        (Some(_), None, None) => {
+                            InProgress(RemoveFromSource, NewComponentUnavailable)
+                        }
+                        (None, Some(dst_component_index), Some(new_component_index)) => InProgress(
+                            OldComponentUnavailable,
+                            match dst_component_index.cmp(&new_component_index) {
+                                Less => NewComponentUnavailable,
+                                Equal => AddNew,
+                                Greater => ExcessNew,
+                            },
+                        ),
+                        (None, Some(_), None) => {
+                            InProgress(OldComponentUnavailable, NewComponentUnavailable)
+                        }
+                        (None, None, Some(_)) => DoneWithExcessNew,
+                        (None, None, None) => Done,
+                    }
+                }
+
+                /// Should be called after the entity's component in the source
+                /// column has been removed entirely or transferred to
+                /// the destination column.
+                #[inline]
+                fn src_column_handled(&mut self) {
+                    self.src_idx += 1;
+                }
+
+                /// Should be called after a component has been added to the
+                /// destination column. This is either a new component
+                /// or the entity's component from the source column.
+                #[inline]
+                fn dst_column_handled(&mut self) {
+                    self.dst_idx += 1;
+                }
+
+                /// Should be called after a new component has been added to the
+                /// destination column.
+                #[inline]
+                fn new_component_handled(&mut self) {
+                    self.new_idx += 1;
+                }
+
+                /// Should be called after the entity's component has been
+                /// removed from the source column.
+                #[inline]
+                pub(super) fn removed_component(&mut self) {
+                    self.src_column_handled();
+                }
+
+                /// Should be called after the entity's component has been
+                /// transferred from the source to the destination column.
+                #[inline]
+                pub(super) fn transferred_component(&mut self) {
+                    self.src_column_handled();
+                    self.dst_column_handled();
+                }
+
+                /// Should be called after the entity's old component in the
+                /// source column has been removed and replaced
+                /// with a new component added
+                /// to the destination column.
+                #[inline]
+                pub(super) fn replaced_component(&mut self) {
+                    self.removed_component();
+                    self.added_component();
+                }
+
+                /// Should be called after a new component has been added to the
+                /// destination column.
+                #[inline]
+                pub(super) fn added_component(&mut self) {
+                    self.dst_column_handled();
+                    self.new_component_handled();
+                }
+
+                #[inline]
+                pub(super) fn src_idx(&self) -> usize {
+                    self.src_idx
+                }
+
+                #[inline]
+                pub(super) fn dst_idx(&self) -> usize {
+                    self.dst_idx
+                }
+
+                #[inline]
+                pub(super) fn new_idx(&self) -> usize {
+                    self.new_idx
+                }
+            }
+        }
+
+        use handle_components::NewComponentState::*;
+        use handle_components::OldComponentState::*;
+        use handle_components::Process;
+        use handle_components::ProcessState::*;
+
+        let mut process = Process::new(
+            src_arch.component_indices(),
+            dst_arch.component_indices(),
+            new_component_indices,
+        );
+
+        loop {
+            match process.state() {
+                InProgress(_, ExcessNew) | DoneWithExcessNew => {
+                    panic!("move_entity called with excess new components");
+                }
+                InProgress(OldComponentUnavailable, NewComponentUnavailable) => {
+                    panic!("move_entity called with new components missing");
+                }
+                InProgress(RemoveFromSource, _) => {
+                    let src_col = &mut *src_arch.columns.as_ptr().add(process.src_idx());
                     src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
 
-                    // Increment the source column index only, as the
-                    // destination column index is already out of bounds.
-                    src_idx += 1;
+                    process.removed_component();
                 }
-                (false, true) => {
-                    // The source column index is out of bounds, so we will not
-                    // encounter a source column to transfer a component from.
-                    // Add a new component to the destination column from the
-                    // `new_components` iterator.
+                InProgress(TransferOrReplace, NewComponentUnavailable) => {
+                    let src_col = &mut *src_arch.columns.as_ptr().add(process.src_idx());
+                    let dst_col = &mut *dst_arch.columns.as_ptr().add(process.dst_idx());
 
-                    let (component_idx, component_ptr) = new_components.next().unwrap_unchecked();
+                    src_col.transfer_elem(
+                        src_arch.entity_ids.len(),
+                        dst_col,
+                        dst_arch.entity_ids.len(),
+                        src.row.0 as usize,
+                    );
 
-                    let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
+                    process.transferred_component();
+                }
+                InProgress(TransferOrReplace, AddNew) => {
+                    let src_col = &mut *src_arch.columns.as_ptr().add(process.src_idx());
+                    let dst_col = &mut *dst_arch.columns.as_ptr().add(process.dst_idx());
 
-                    let dst_comp_idx = *dst_arch.component_indices.get_unchecked(dst_idx);
+                    src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
 
-                    debug_assert_eq!(component_idx, dst_comp_idx);
+                    let new_component = new_component_pointers[process.new_idx()];
 
                     let dst_ptr = dst_col
                         .data
@@ -528,23 +773,398 @@ impl Archetypes {
 
                     // Insert the new component into the destination column.
                     ptr::copy_nonoverlapping(
-                        component_ptr,
+                        new_component,
                         dst_ptr,
                         dst_col.component_layout.size(),
                     );
 
-                    // Increment the destination column index only, as the
-                    // source column index is already out of bounds.
+                    process.replaced_component();
+                }
+                InProgress(OldComponentUnavailable, AddNew) => {
+                    let dst_col = &mut *dst_arch.columns.as_ptr().add(process.dst_idx());
+
+                    let new_component = new_component_pointers[process.new_idx()];
+
+                    let dst_ptr = dst_col
+                        .data
+                        .as_ptr()
+                        .add(dst_col.component_layout.size() * dst_arch.entity_ids.len());
+
+                    ptr::copy_nonoverlapping(
+                        new_component,
+                        dst_ptr,
+                        dst_col.component_layout.size(),
+                    );
+
+                    process.added_component();
+                }
+                Done => break,
+            }
+        }
+
+        // TODO: Remove this old code after a commit.
+        /*struct Cruncher<'lc, 'rc, 'ls, 'rs, T: Ord> {
+            left_index: &'lc Cell<usize>,
+            right_index: &'rc Cell<usize>,
+            left_slice: &'ls [T],
+            right_slice: &'rs [T],
+        }
+
+        enum CruncherState {
+            /// There will not be a matching right value for this left value.
+            RightHasPassedLeft,
+            /// The left and right values are equal.
+            Match,
+            /// There will not be a matching left value for this right value.
+            LeftHasPassedRight,
+            /// Both indices are out of bounds.
+            BothOutOfBounds,
+        }
+
+        impl<'lc, 'rc, 'ls, 'rs, T: Ord> Cruncher<'lc, 'rc, 'ls, 'rs, T> {
+            #[inline]
+            fn new(
+                left_index: &'lc Cell<usize>,
+                right_index: &'rc Cell<usize>,
+                left_slice: &'ls [T],
+                right_slice: &'rs [T],
+            ) -> Self {
+                Self {
+                    left_index,
+                    right_index,
+                    left_slice,
+                    right_slice,
+                }
+            }
+
+            #[inline]
+            fn left_val(&self) -> MaybeInfinite<&T> {
+                infinite_if_none(self.left_slice.get(self.left_index.get()))
+            }
+
+            #[inline]
+            fn right_val(&self) -> MaybeInfinite<&T> {
+                infinite_if_none(self.right_slice.get(self.right_index.get()))
+            }
+
+            #[inline]
+            fn state(&self) -> CruncherState {
+                match self.left_val().partial_cmp(&self.right_val()) {
+                    Some(Less) => CruncherState::RightHasPassedLeft,
+                    Some(Equal) => CruncherState::Match,
+                    Some(Greater) => CruncherState::LeftHasPassedRight,
+                    None => CruncherState::BothOutOfBounds,
+                }
+            }
+
+            #[inline]
+            fn left_handled(&self) {
+                self.left_index.set(self.left_index.get() + 1);
+            }
+
+            #[inline]
+            fn right_handled(&self) {
+                self.right_index.set(self.right_index.get() + 1);
+            }
+
+            #[inline]
+            fn both_handled(&self) {
+                self.left_handled();
+                self.right_handled();
+            }
+        }
+
+        let src_idx = Cell::new(0);
+        let dst_idx = Cell::new(0);
+        let new_idx = Cell::new(0);
+
+        let src_dst_cruncher = Cruncher::new(
+            &src_idx,
+            &dst_idx,
+            &src_arch.component_indices,
+            &dst_arch.component_indices,
+        );
+        let dst_new_cruncher = Cruncher::new(
+            &dst_idx,
+            &new_idx,
+            &dst_arch.component_indices,
+            &new_component_indices,
+        );
+
+        // Called after the entity's component in the source column has been
+        // removed entirely or transferred to the destination column.
+        let src_column_handled = || src_idx.set(src_idx.get() + 1);
+
+        // Called after a component has been added to the destination column.
+        // This is either a new component or the entity's component from the
+        // source column.
+        let dst_column_handled = || dst_idx.set(dst_idx.get() + 1);
+
+        // Called after a new component has been added to the destination
+        // column.
+        let new_component_handled = || new_idx.set(new_idx.get() + 1);
+
+        let removed_component = || {
+            src_column_handled();
+        };
+
+        let transferred_component = || {
+            src_column_handled();
+            dst_column_handled();
+        };
+
+        let added_component = || {
+            dst_column_handled();
+            new_component_handled();
+        };
+
+        let replaced_component = || {
+            removed_component();
+            added_component();
+        };
+
+        loop {
+            match (src_dst_cruncher.state(), dst_new_cruncher.state()) {
+                (_, CruncherState::LeftHasPassedRight) => {
+                    panic!("excess new components");
+                }
+                (CruncherState::RightHasPassedLeft, _) => {
+                    // There will not be a matching destination column that we
+                    // could transfer the entity's component from this source
+                    // column to. Remove the component.
+
+                    removed_component();
+                }
+                // The src and dst columns match.
+                (CruncherState::Match, CruncherState::RightHasPassedLeft) => {
+                    // The source and destination columns match, and there will
+                    // be no new component to insert into this destination
+                    // column. Transfer the component from the source to the
+                    // destination column.
+
+                    transferred_component();
+                }
+                (CruncherState::Match, CruncherState::Match) => {
+                    // The source and destination columns match, and there is a
+                    // new component we can insert. Remove the old component
+                    // from the source column and add the new component to the
+                    // destination column. This effectively replaces the
+                    // entity's component.
+
+                    replaced_component();
+                }
+                (CruncherState::Match, CruncherState::BothOutOfBounds) => {}
+                // There will not be a matching src column for this dst column.
+                (CruncherState::LeftHasPassedRight, CruncherState::RightHasPassedLeft) => {}
+                (CruncherState::LeftHasPassedRight, CruncherState::Match) => {}
+                (CruncherState::LeftHasPassedRight, CruncherState::BothOutOfBounds) => {}
+                (CruncherState::BothOutOfBounds, CruncherState::BothOutOfBounds) => {
+                    break;
+                }
+                (CruncherState::BothOutOfBounds, _) => {
+                    panic!();
+                }
+            }
+        }
+
+        // Both column indices start at zero.
+        let mut src_idx = 0;
+        let mut dst_idx = 0;
+        let mut new_idx = 0;
+
+        loop {
+            let src_comp_idx = infinite_if_none(src_arch.component_indices.get(src_idx).copied());
+            let dst_comp_idx = infinite_if_none(dst_arch.component_indices.get(dst_idx).copied());
+            let new_comp_idx = infinite_if_none(new_component_indices.get(new_idx).copied());
+
+            let Some(src_vs_dst) = src_comp_idx.partial_cmp(&dst_comp_idx) else {
+                // Values incomparable, hence they're both infinite, meaning
+                // both `src_comp_idx` and `dst_comp_idx` are out of bounds.
+                // We handled all the columns of both archetypes, break the
+                // loop.
+                break;
+            };
+
+            let dst_vs_new = dst_comp_idx.partial_cmp(&new_comp_idx);
+
+            match (src_vs_dst, dst_vs_new) {
+                (Less, Some(Less)) => (),
+                (Less, Some(Equal)) => (),
+                (Less, Some(Greater)) => (),
+                (Less, None) => (),
+                (Equal, Some(Less)) => (),
+                (Equal, Some(Equal)) => (),
+                (Equal, Some(Greater)) => (),
+                (Equal, None) => (),
+                (Greater, Some(Less)) => (),
+                (Greater, Some(Equal)) => (),
+                (Greater, Some(Greater)) => (),
+                (Greater, None) => (),
+            }
+
+            match src_comp_idx.partial_cmp(&dst_comp_idx) {
+                Some(Less) => {
+                    // The source component index is less than the destination
+                    // component index, so we will not encounter a matching
+                    // destination column to transfer a component to. Remove the
+                    // entity's component from the source column.
+
+                    // Remove the old component from the source column.
+                    let src_col = &mut *src_arch.columns.as_ptr().add(src_idx);
+                    src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
+
+                    // Increment the source column index only, as we haven't
+                    // handled the destination column at the current destination
+                    // column index yet.
+                    src_idx += 1;
+                }
+                Some(Equal) => {
+                    // The source archetype has a component index that the
+                    // destination archetype also has. This means we should
+                    // transfer the old component at that component index from
+                    // the source to the destination, unless a new component was
+                    // provided. In that case, we should remove the old
+                    // component from the source column and insert the new
+                    // component into the destination column.
+
+                    let src_col = &mut *src_arch.columns.as_ptr().add(src_idx);
+                    let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
+
+                    let new_comp_idx =
+                        infinite_if_none(new_component_indices.get(new_idx).copied());
+
+                    match dst_comp_idx.partial_cmp(&new_comp_idx) {
+                        Some(Less) => {
+                            // Won't encounter matching new_comp_idx.
+
+                            // Transfer the component.
+                            src_col.transfer_elem(
+                                src_arch.entity_ids.len(),
+                                dst_col,
+                                dst_arch.entity_ids.len(),
+                                src.row.0 as usize,
+                            );
+                        }
+                        Some(Equal) => {
+                            // Great. Remove the old and insert the new.
+
+                            src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
+
+                            let new_component = new_component_pointers[new_idx];
+
+                            let dst_ptr = dst_col
+                                .data
+                                .as_ptr()
+                                .add(dst_col.component_layout.size() * dst_arch.entity_ids.len());
+
+                            // Insert the new component into the
+                            // destination column.
+                            ptr::copy_nonoverlapping(
+                                new_component,
+                                dst_ptr,
+                                dst_col.component_layout.size(),
+                            );
+
+                            new_idx += 1;
+                        }
+                        Some(Greater) => {
+                            // Won't encounter matching dst_comp_idx.
+                            // This means this new component is excess.
+                            // This is bad and shouldn't happen.
+                            panic!("excess new components");
+                        }
+                        None => {
+                            // `dst_comp_idx` is guaranteed to be `Finite`,
+                            // as `src_comp_idx.partial_cmp(&dst_comp_idx) ==
+                            // Some(Ordering::Equal)` can only hold when both
+                            // `src_comp_idx` and `dst_comp_idx` are `Finite`.
+                            // Also, `ComponentIdx` implements `Ord`, so the
+                            // only way for `dst_comp_idx.partial_cmp(
+                            // &new_comp_idx)` to be `None` would be if both
+                            // `dst_comp_idx` and `new_comp_idx` were
+                            // `Infinite`, which we already ruled out.
+                            unreachable!()
+                        }
+                    }
+
+                    // Increment both column indices, as the transfer
+                    // operation handled both the source and the
+                    // destination columns at their respective current
+                    // indices.
+                    src_idx += 1;
                     dst_idx += 1;
                 }
-                (false, false) => {
+                Some(Greater) => {
+                    // The destination component index is less than the
+                    // source component index, so we will not encounter
+                    // a matching source column to transfer a component
+                    // from. Add a new component to the destination
+                    // column from the `new_components` iterator.
+
+                    let new_comp_idx =
+                        infinite_if_none(new_component_indices.get(new_idx).copied());
+
+                    match dst_comp_idx.partial_cmp(&new_comp_idx) {
+                        Some(Less) => {
+                            // Won't encounter matching new_comp_idx.
+                            // This is bad and shouldn't happen.
+                            panic!("no new component to insert");
+                        }
+                        Some(Equal) => {
+                            // Great. Remove the old and insert the new.
+
+                            let new_component = new_component_pointers[new_idx];
+
+                            let dst_col = &mut *dst_arch.columns.as_ptr().add(dst_idx);
+
+                            let dst_ptr = dst_col
+                                .data
+                                .as_ptr()
+                                .add(dst_col.component_layout.size() * dst_arch.entity_ids.len());
+
+                            // Insert the new component into the
+                            // destination column.
+                            ptr::copy_nonoverlapping(
+                                new_component,
+                                dst_ptr,
+                                dst_col.component_layout.size(),
+                            );
+
+                            new_idx += 1;
+                        }
+                        Some(Greater) => {
+                            // Won't encounter matching dst_comp_idx.
+                            // This means this new component is excess.
+                            // This is bad and shouldn't happen.
+                            panic!("excess new components");
+                        }
+                        None => {
+                            // `dst_comp_idx` is guaranteed to be `Finite`,
+                            // as `src_comp_idx.partial_cmp(&dst_comp_idx) ==
+                            // Some(Ordering::Greater)` can only hold when both
+                            // `dst_comp_idx` are `Finite`. Also, `ComponentIdx`
+                            // implements `Ord`, so the only way for
+                            // `dst_comp_idx.partial_cmp(&new_comp_idx)` to be
+                            // `None` would be if both `dst_comp_idx` and
+                            // `new_comp_idx` were `Infinite`, which we already
+                            // ruled out.
+                            unreachable!()
+                        }
+                    }
+
+                    // Increment the destination column index only, as
+                    // we haven't handled the source column at the
+                    // current source column index yet.
+                    dst_idx += 1;
+                }
+                None => {
                     // Both column indices are out of bounds. Break the loop.
                     break;
                 }
             }
         }
 
-        debug_assert!(new_components.next().is_none());
+        debug_assert!(new_idx == new_component_indices.len());*/
 
         // Transfer the entity id.
         let entity_id = src_arch.entity_ids.swap_remove(src.row.0 as usize);
@@ -765,7 +1385,6 @@ impl Archetype {
         // Create a column for each component and register this archetype in the
         // component infos.
         let columns: Box<[Column]> = component_indices
-            .as_ref()
             .iter()
             .map(|&idx| {
                 // SAFETY: Caller guaranteed the component indices are valid.
@@ -1203,6 +1822,8 @@ impl RefUnwindSafe for Column {}
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::Layout;
+
     use crate::prelude::*;
 
     #[derive(Component)]
@@ -1284,5 +1905,28 @@ mod tests {
             .archetypes()
             .get_by_components(&[a_id.index()])
             .is_some());
+    }
+
+    #[test]
+    fn test() {
+        #[derive(Component)]
+        struct A;
+
+        #[derive(Component)]
+        struct B;
+
+        #[derive(Component)]
+        #[repr(align(32))]
+        struct C;
+
+        println!("{:?}", Layout::new::<C>());
+
+        let mut world = World::new();
+        let e = world.spawn();
+
+        world.insert(e, (A, B, C));
+        world.get::<A>(e).unwrap();
+        world.get::<B>(e).unwrap();
+        world.get::<C>(e).unwrap();
     }
 }
