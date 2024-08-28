@@ -1032,7 +1032,15 @@ impl Archetype {
                 // Construct the column.
                 Column {
                     component_layout: info.layout(),
-                    data: NonNull::dangling(),
+                    data: unsafe {
+                        // Create a dangling pointer that is correctly aligned.
+                        // Correct alignment is necessary as we create borrows
+                        // from this pointer, which have to *always* be aligned.
+                        // TODO: Use `Layout::dangling` once it's stabilized.
+                        // SAFETY: The alignment is guaranteed to be non-zero,
+                        // so the pointer cannot be null.
+                        NonNull::new_unchecked(transmute(info.layout().align()))
+                    },
                     drop: info.drop(),
                 }
             })
