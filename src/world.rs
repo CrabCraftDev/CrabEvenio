@@ -815,6 +815,14 @@ impl World {
     /// assert_eq!(id, world.add_global_event::<MyEvent>());
     /// ```
     pub fn add_global_event<E: GlobalEvent>(&mut self) -> GlobalEventId {
+        // Returning early here if the event already exists saves us the cost of
+        // unnecessarily initializing the event in EventDescriptor::new.
+        if let Some(info) = self
+            .global_events
+            .get_by_type_id(TypeId::of::<E::This<'static>>())
+        {
+            return info.id();
+        }
         let desc = EventDescriptor::new::<E>(self);
         unsafe { self.add_global_event_with_descriptor(desc) }
     }
@@ -840,6 +848,14 @@ impl World {
     /// assert_eq!(id, world.add_targeted_event::<MyEvent>());
     /// ```
     pub fn add_targeted_event<E: TargetedEvent>(&mut self) -> TargetedEventId {
+        // Returning early here if the event already exists saves us the cost of
+        // unnecessarily initializing the event in EventDescriptor::new.
+        if let Some(info) = self
+            .targeted_events
+            .get_by_type_id(TypeId::of::<E::This<'static>>())
+        {
+            return info.id();
+        }
         let desc = EventDescriptor::new::<E>(self);
         unsafe { self.add_targeted_event_with_descriptor(desc) }
     }
@@ -900,10 +916,10 @@ impl World {
     ) -> TargetedEventId {
         let (id, is_new) = self.targeted_events.add(desc);
 
-        // SAFETY: We just added the event.
-        let kind = self.targeted_events.get(id).unwrap_unchecked().kind();
-
         if is_new {
+            // SAFETY: We just added the event.
+            let kind = self.targeted_events.get(id).unwrap_unchecked().kind();
+
             match kind {
                 EventKind::Normal => {}
                 EventKind::Insert(InsertKindInfo {
