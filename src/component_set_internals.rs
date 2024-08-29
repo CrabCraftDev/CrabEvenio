@@ -1,12 +1,11 @@
 //! Implementation details of the [`ComponentSet`] trait.
 
-use core::iter::once;
 use core::mem::MaybeUninit;
 
 use evenio_macros::all_tuples;
 
 use crate::boxed_slice;
-use crate::component::{Component, ComponentIdx, ComponentSet};
+use crate::component::{Component, ComponentId, ComponentInfo, ComponentSet};
 use crate::permutation::Permutation;
 use crate::world::World;
 
@@ -65,21 +64,24 @@ pub unsafe trait ComponentSetInternal {
     /// The number of components in the set.
     const LEN: usize;
 
-    /// Adds the components of this set to the world and extends the passed
-    /// collection by their component indices. May extend the collection with
-    /// the same index multiple times.
+    /// Adds the components of this set to the world and calls the passed
+    /// callback with their IDs. May call the callback with the same ID multiple
+    /// times.
     ///
-    /// Implementations must ensure that (1) the collection is extended by
-    /// exactly [`Self::LEN`] elements and (2) the order in which the collection
-    /// is extended exactly matches the order in which [`get_components`]
-    /// adds component pointers to the [`ComponentPointerConsumer`] it is
-    /// passed.
+    /// Implementations must ensure that (1) the callback is called exactly
+    /// [`Self::LEN`] times and (2) the order of the calls exactly matches the
+    /// order in which [`get_components`] adds component pointers to the
+    /// [`ComponentPointerConsumer`] it is passed.
     // NOTE: Returning an iterator would be more idiomatic, but causes the
     // borrow checker to complain in the tuple implementations because of
     // multiple mutable borrows of the world existing at the same time. I
     // (AsterixxxGallier) could not get it to work.
-    // TODO use ComponentId's instead?
-    fn add_components(world: &mut World, component_indices: &mut impl Extend<ComponentIdx>);
+    fn add_components(world: &mut World, add_component_id: impl FnMut(ComponentId));
+
+    /// Removes the components of this set from the world and calls the passed
+    /// callback with the [`ComponentInfo`] of each component that existed and
+    /// was successfully removed.
+    fn remove_components(world: &mut World, add_component_info: impl FnMut(ComponentInfo));
 
     /// Adds type-erased pointers to the components in this set to the given
     /// [`ComponentPointerConsumer`].
@@ -96,9 +98,14 @@ pub unsafe trait ComponentSetInternal {
 unsafe impl<C: Component> ComponentSetInternal for C {
     const LEN: usize = 1;
 
-    fn add_components(world: &mut World, component_indices: &mut impl Extend<ComponentIdx>) {
-        // TODO: Use `Extend::extend_one` once it's stabilized.
-        component_indices.extend(once(world.add_component::<C>().index()))
+    fn add_components(world: &mut World, mut add_component_id: impl FnMut(ComponentId)) {
+        add_component_id(world.add_component::<C>())
+    }
+
+    fn remove_components(world: &mut World, mut add_component_info: impl FnMut(ComponentInfo)) {
+        if let Some(info) = world.remove_component::<C>() {
+            add_component_info(info);
+        }
     }
 
     fn get_components(&self, out: &mut ComponentPointerConsumer) {
@@ -112,9 +119,15 @@ macro_rules! impl_component_set_tuple {
         unsafe impl<$($C: ComponentSet),*> ComponentSetInternal for ($($C,)*) {
             const LEN: usize = 0 $(+ $C::LEN)*;
 
-            fn add_components(world: &mut World, component_indices: &mut impl Extend<ComponentIdx>) {
+            fn add_components(world: &mut World, mut add_component_id: impl FnMut(ComponentId)) {
                 $(
-                    $C::add_components(world, component_indices);
+                    $C::add_components(world, &mut add_component_id);
+                )*
+            }
+
+            fn remove_components(world: &mut World, mut add_component_info: impl FnMut(ComponentInfo)) {
+                $(
+                    $C::remove_components(world, &mut add_component_info);
                 )*
             }
 

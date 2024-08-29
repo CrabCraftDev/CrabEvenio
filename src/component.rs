@@ -478,7 +478,7 @@ mod tests {
 
         let mut world = World::new();
 
-        let c1 = world.add_component::<A>();
+        world.add_component::<A>();
         let e1 = world.spawn();
         world.insert(e1, A("hello".into()));
         let s1 = world.add_handler(|_: Receiver<E>, mut a: Single<&mut A>| {
@@ -486,7 +486,7 @@ mod tests {
         });
         world.send(E);
 
-        assert!(world.remove_component(c1).is_some());
+        assert!(world.remove_component::<A>().is_some());
         assert!(!world.handlers().contains(s1));
         assert!(!world.entities().contains(e1));
         assert_eq!(
@@ -495,7 +495,7 @@ mod tests {
             "only the empty archetype should be present"
         );
 
-        let c2 = world.add_component::<B>();
+        world.add_component::<B>();
         let e2 = world.spawn();
         assert!(world.entities().contains(e2));
         world.insert(e2, B(vec![]));
@@ -505,7 +505,7 @@ mod tests {
         world.send(E);
         assert_eq!(world.get::<B>(e2), Some(&B(vec!["hello".into()])));
 
-        assert!(world.remove_component(c2).is_some());
+        assert!(world.remove_component::<B>().is_some());
         assert!(!world.handlers().contains(s2));
         assert!(!world.entities().contains(e2));
         assert_eq!(world.archetypes().len(), 1);
@@ -545,12 +545,12 @@ mod tests {
         assert_eq!(world.components()[c2].member_of.len(), 2);
         assert_eq!(world.components()[c3].member_of.len(), 1);
 
-        world.remove_component(c3);
+        world.remove_component_by_id(c3);
 
         assert_eq!(world.components()[c1].member_of.len(), 2);
         assert_eq!(world.components()[c2].member_of.len(), 1);
 
-        world.remove_component(c2);
+        world.remove_component_by_id(c2);
 
         assert_eq!(world.components()[c1].member_of.len(), 1);
     }

@@ -508,7 +508,6 @@ impl World {
         Some(info)
     }
 
-    // TODO: Add and remove sets of components.
     /// Adds the component `C` to the world, returns its [`ComponentId`], and
     /// sends the [`AddComponent`] event to signal its creation.
     ///
@@ -538,6 +537,38 @@ impl World {
         };
 
         unsafe { self.add_component_with_descriptor(desc) }
+    }
+
+    /// Adds all components of the set `C` to the world, returns their
+    /// [`ComponentId`]s, and sends the [`AddComponent`] event for each added
+    /// component to signal its creation.
+    ///
+    /// If a component already exists, then the [`ComponentId`] of the
+    /// existing component is returned and no event is sent for that component.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use evenio::prelude::*;
+    ///
+    /// #[derive(Component)]
+    /// struct MyComponent;
+    ///
+    /// #[derive(Component)]
+    /// struct MyOtherComponent;
+    ///
+    /// let mut world = World::new();
+    /// let ids = world.add_components::<(MyComponent, MyOtherComponent)>();
+    ///
+    /// assert_eq!(ids, world.add_components::<(MyComponent, MyOtherComponent)>());
+    /// ```
+    pub fn add_components<C: ComponentSet>(&mut self) -> Vec<ComponentId> {
+        // TODO: Use an ArrayVec here and in other places where we call
+        //  ComponentSet::add_components or ::remove_components? We know the
+        //  maximum capacity, and this would save us a heap allocation.
+        let mut ids = Vec::with_capacity(C::LEN);
+        C::add_components(self, |id| ids.push(id));
+        ids
     }
 
     /// Adds a component described by a given [`ComponentDescriptor`].
@@ -594,13 +625,13 @@ impl World {
     /// assert!(world.components().contains(component));
     /// assert!(world.handlers().contains(handler));
     ///
-    /// world.remove_component(component);
+    /// world.remove_component_by_id(component);
     ///
     /// assert!(!world.components().contains(component));
     /// // Handler was also removed because it references `C` in its `Fetcher`.
     /// assert!(!world.handlers().contains(handler));
     /// ```
-    pub fn remove_component(&mut self, component: ComponentId) -> Option<ComponentInfo> {
+    pub fn remove_component_by_id(&mut self, component: ComponentId) -> Option<ComponentInfo> {
         if !self.components.contains(component) {
             return None;
         }
@@ -667,6 +698,97 @@ impl World {
             });
 
         Some(info)
+    }
+
+    /// Removes a component from the world and returns its [`ComponentInfo`]. If
+    /// the component does not exist, then `None` is returned and the function
+    /// has no effect.
+    ///
+    /// Removing a component has the following effects in the order listed:
+    /// 1. The [`RemoveComponent`] event is sent.
+    /// 2. All entities with the component are despawned.
+    /// 3. All handlers that reference the component are removed.
+    /// 4. The corresponding [`Insert`] events for the component are removed.
+    /// 5. The corresponding [`Remove`] events for the component are removed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use evenio::prelude::*;
+    /// # let mut world = World::new();
+    /// # #[derive(Component)] struct C;
+    /// # #[derive(GlobalEvent)] struct E;
+    /// #
+    /// let component = world.add_component::<C>();
+    /// let handler = world.add_handler(|_: Receiver<E>, _: Fetcher<&C>| {});
+    ///
+    /// assert!(world.components().contains(component));
+    /// assert!(world.handlers().contains(handler));
+    ///
+    /// world.remove_component::<C>();
+    ///
+    /// assert!(!world.components().contains(component));
+    /// // Handler was also removed because it references `C` in its `Fetcher`.
+    /// assert!(!world.handlers().contains(handler));
+    /// ```
+    pub fn remove_component<C: Component>(&mut self) -> Option<ComponentInfo> {
+        let info = self.components.get_by_type_id(TypeId::of::<C>())?;
+        self.remove_component_by_id(info.id())
+    }
+
+    /// Removes all components of the set `C` from the world, and returns their
+    /// [`ComponentInfo`]s. If a component in the set does not exist, the
+    /// returned collection will not contain a [`ComponentInfo`] for it.
+    /// 
+    /// See [`remove_component`] for the effects of this function for each
+    /// component in the set.
+    ///
+    /// If a component already exists, then the [`ComponentId`] of the
+    /// existing component is returned and no event is sent for that component.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use evenio::prelude::*;
+    /// 
+    /// #[derive(GlobalEvent)]
+    /// struct MyEvent;
+    ///
+    /// #[derive(Component)]
+    /// struct MyComponent;
+    ///
+    /// #[derive(Component)]
+    /// struct MyOtherComponent;
+    ///
+    /// let mut world = World::new();
+    /// let [my_component, my_other_component] =
+    ///     world.add_components::<(MyComponent, MyOtherComponent)>()[..] else {
+    ///     unreachable!("add_components returns one ID for each added component");
+    /// };
+    /// 
+    /// let my_handler = world.add_handler(|_: Receiver<MyEvent>, _: Fetcher<&MyComponent>| {});
+    /// let my_other_handler = world.add_handler(|_: Receiver<MyEvent>, _: Fetcher<&MyOtherComponent>| {});
+    ///
+    /// assert!(world.components().contains(my_component));
+    /// assert!(world.components().contains(my_other_component));
+    /// assert!(world.handlers().contains(my_handler));
+    /// assert!(world.handlers().contains(my_other_handler));
+    ///
+    /// world.remove_components::<(MyComponent, MyOtherComponent)>();
+    ///
+    /// assert!(!world.components().contains(my_component));
+    /// assert!(!world.components().contains(my_other_component));
+    /// // Handlers were also removed because they referenced removed components
+    /// // in their `Fetcher`s.
+    /// assert!(!world.handlers().contains(my_handler));
+    /// assert!(!world.handlers().contains(my_other_handler));
+    /// ```
+    /// 
+    /// [`remove_component`]: World::remove_component
+    pub fn remove_components<C: ComponentSet>(&mut self) -> Vec<ComponentInfo> {
+        let mut infos = Vec::with_capacity(C::LEN);
+        C::remove_components(self, |id| infos.push(id));
+        infos
     }
 
     /// Adds the global event `E` to the world, returns its [`GlobalEventId`],

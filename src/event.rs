@@ -991,6 +991,12 @@ all_tuples!(impl_event_set_tuple, 0, 64, E, e);
 /// Adds all components of a set to a world and sorts their component indices.
 /// Returns a tuple of the permutation used to sort the indices and the indices
 /// themselves, or `Err(())` if any component index appeared twice.
+// NOTE: It's fine that this returns component indices and not IDs. The indices
+// are stored in Insert / Remove events. The IDs of these events are stored in
+// the component infos of all components in the set. Whenever any component in
+// the set is removed (invalidating its component index), the whole event is
+// also removed. This prevents the returned component indices from being used
+// after their invalidation.
 fn initialize_component_set<C: ComponentSet>(
     world: &mut World,
 ) -> Result<(Permutation, ComponentIndices), ()> {
@@ -1013,7 +1019,7 @@ fn initialize_component_set<C: ComponentSet>(
 
     // Add the components to the world and collect their indices.
     let mut unsorted_component_indices = Vec::with_capacity(C::len());
-    C::add_components(world, &mut unsorted_component_indices);
+    C::add_components(world, |id| unsorted_component_indices.push(id.index()));
 
     // Compute a permutation to sort the indices.
     let permutation = Permutation::sorting(&unsorted_component_indices);
