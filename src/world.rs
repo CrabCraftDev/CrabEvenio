@@ -14,8 +14,8 @@ use bumpalo::Bump;
 use crate::access::ComponentAccess;
 use crate::archetype::Archetypes;
 use crate::component::{
-    AddComponent, Component, ComponentDescriptor, ComponentId, ComponentInfo, ComponentSet,
-    Components, RemoveComponent,
+    AddComponent, Component, ComponentDescriptor, ComponentId, ComponentIdx, ComponentInfo,
+    ComponentSet, Components, RemoveComponent,
 };
 use crate::component_indices::ComponentIndices;
 use crate::component_set_internals::ComponentPointerConsumer;
@@ -31,6 +31,7 @@ use crate::handler::{
     AddHandler, Handler, HandlerConfig, HandlerId, HandlerInfo, HandlerInfoInner, HandlerList,
     Handlers, IntoHandler, MaybeInvalidAccess, ReceivedEventId, RemoveHandler,
 };
+use crate::map::IndexSet;
 use crate::mutability::Mutability;
 use crate::query::{Query, ReadOnlyQuery};
 
@@ -242,6 +243,18 @@ impl World {
         self.send_to(entity, Despawn)
     }
 
+    fn conflicts_error_message(&self, mut write: impl Write, conflicts: IndexSet<ComponentIdx>) {
+        writeln!(write, "conflicting components are...").unwrap();
+
+        for &idx in &conflicts {
+            write!(write, "- ").unwrap();
+            match self.components.get_by_index(idx) {
+                Some(info) => writeln!(write, "{}", info.name()).unwrap(),
+                None => writeln!(write, "{idx:?}").unwrap(),
+            };
+        }
+    }
+
     /// Queries an entity with a read-only query. Returns `None` if the entity
     /// doesn't exist or doesn't match the query.
     ///
@@ -265,8 +278,10 @@ impl World {
 
         let arch = unsafe { self.archetypes().get(loc.archetype).unwrap_unchecked() };
 
-        let mut query_state = Q::get_new_state(self)?;
-        let arch_state = Q::new_arch_state(arch, &mut query_state)?;
+        let state = Q::get_new_state(self)?;
+        let arch_state = Q::new_arch_state(arch, &state)?;
+        // Don't need to check component access here, because the query is
+        // read-only anyway (no aliased mutability possible).
         unsafe { Some(Q::get(&arch_state, loc.row)) }
     }
 
@@ -286,15 +301,30 @@ impl World {
     /// let e = world.spawn();
     /// world.insert(e, MyComponent(123));
     ///
-    /// assert_eq!(world.get_mut::<&mut MyComponent>(e), Some(&mut MyComponent(123)));
+    /// assert_eq!(
+    ///     world.get_mut::<&mut MyComponent>(e),
+    ///     Some(&mut MyComponent(123))
+    /// );
     /// ```
     pub fn get_mut<Q: Query>(&self, entity: EntityId) -> Option<Q::This<'_>> {
         let loc = self.entities.get(entity)?;
 
         let arch = unsafe { self.archetypes().get(loc.archetype).unwrap_unchecked() };
 
-        let mut query_state = Q::get_new_state(self)?;
-        let arch_state = Q::new_arch_state(arch, &mut query_state)?;
+        let state = Q::get_new_state(self)?;
+        let arch_state = Q::new_arch_state(arch, &state)?;
+        // TODO: Cache this component access?
+        let access = Q::get_access(&state, |_idx| {});
+        let conflicts = access.collect_conflicts();
+        if !conflicts.is_empty() {
+            let mut message = "called World::get_mut with a query that has conflicting component \
+                               access (aliased mutability)\n"
+                .to_string();
+
+            self.conflicts_error_message(&mut message, conflicts);
+
+            panic!("{}", message);
+        }
         unsafe { Some(Q::get(&arch_state, loc.row)) }
     }
 
@@ -358,22 +388,13 @@ impl World {
         let conflicts = component_access_conjunction.collect_conflicts();
 
         if !conflicts.is_empty() {
-            let mut errmsg = format!(
-                "handler {handler_name} contains conflicting component access (aliased \
-                 mutability)\nconflicting components are...\n"
-            );
+            let mut message = "handler {handler_name} contains conflicting component access \
+                               (aliased mutability)\n"
+                .into();
 
-            for idx in conflicts {
-                errmsg += "- ";
-                match self.components.get_by_index(idx) {
-                    Some(info) => errmsg += info.name(),
-                    None => {
-                        write!(&mut errmsg, "{idx:?}").unwrap();
-                    }
-                };
-            }
+            self.conflicts_error_message(&mut message, conflicts);
 
-            return Err(errmsg);
+            return Err(message);
         }
 
         let component_access_disjunction = config
@@ -1502,6 +1523,18 @@ mod tests {
     use std::panic;
 
     use crate::prelude::*;
+
+    #[test]
+    #[should_panic]
+    fn self_aliasing_query() {
+        #[derive(Component)]
+        struct C;
+
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, C);
+        world.get_mut::<(&mut C, &mut C)>(e);
+    }
 
     #[test]
     fn world_drops_events() {

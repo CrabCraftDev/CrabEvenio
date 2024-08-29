@@ -452,7 +452,7 @@ unsafe impl<E: TargetedEvent, Q: Query + 'static> HandlerParam for Receiver<'_, 
         let event_id = world.add_targeted_event::<E>();
 
         let state = Q::new_state(world);
-        let ca = Q::init(&state, |idx| {
+        let ca = Q::get_access(&state, |idx| {
             config.referenced_components.insert(idx);
         });
 
@@ -576,7 +576,7 @@ where
         let event_id = world.add_targeted_event::<E>();
 
         let state = Q::new_state(world);
-        let ca = Q::init(&state, |idx| {
+        let ca = Q::get_access(&state, |idx| {
             config.referenced_components.insert(idx);
         });
 

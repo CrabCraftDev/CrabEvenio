@@ -120,12 +120,12 @@ pub(crate) fn derive_query(input: TokenStream) -> Result<TokenStream> {
 
             type State = <#tuple_ty as ::evenio::query::Query>::State;
 
-            fn init(
+            fn get_access(
                 state: &Self::State,
                 add_referenced_component: impl FnMut(::evenio::component::ComponentIdx),
             ) -> ::evenio::access::ComponentAccess
             {
-                <#tuple_ty as ::evenio::query::Query>::init(state, add_referenced_component)
+                <#tuple_ty as ::evenio::query::Query>::get_access(state, add_referenced_component)
             }
 
             fn new_state(world: &mut ::evenio::world::World) -> Self::State {

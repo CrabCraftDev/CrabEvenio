@@ -38,7 +38,7 @@ impl<Q: Query> FetcherState<Q> {
     /// also initializes the query.
     pub(crate) fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self, InitError> {
         let state = Q::new_state(world);
-        let ca = Q::init(&state, |idx| {
+        let ca = Q::get_access(&state, |idx| {
             config.referenced_components.insert(idx);
         });
 
