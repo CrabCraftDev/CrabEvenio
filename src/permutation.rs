@@ -3,11 +3,9 @@
 use std::mem::MaybeUninit;
 use crate::boxed_slice;
 
-/// A permutation used for reordering the elements of a slice. This struct is
-/// marked public, but is only actually accessible from within the crate, as it
-/// is placed in a `pub(crate)` module.
+/// A permutation used for reordering the elements of a slice.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct Permutation {
+pub(crate) struct Permutation {
     inner: Box<[usize]>,
 }
 

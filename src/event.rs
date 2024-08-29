@@ -9,7 +9,7 @@ use alloc::{vec, vec::Vec};
 use core::alloc::Layout;
 use core::any::TypeId;
 use core::marker::PhantomData;
-use core::mem::{offset_of, transmute};
+use core::mem::transmute;
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{any, fmt, slice, str};
@@ -98,22 +98,34 @@ pub enum EventKind {
     #[default]
     Normal,
     /// The [`Insert`] event.
-    Insert {
-        /// The [`ComponentIndices`] of the components to insert.
-        component_indices: ComponentIndices,
-        /// Implementation detail. Permutation used to sort the underlying
-        /// component set.
-        permutation: Permutation,
-    },
+    Insert(InsertKindInfo),
     /// The [`Remove`] event.
-    Remove {
-        /// The [`ComponentIndices`] of the components to remove.
-        component_indices: ComponentIndices,
-    },
+    Remove(RemoveKindInfo),
     /// The [`Spawn`] event.
     Spawn,
     /// The [`Despawn`] event.
     Despawn,
+}
+
+/// Additional data for [`EventKind::Insert`].
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct InsertKindInfo {
+    /// The indices of the components to insert.
+    pub(crate) component_indices: ComponentIndices,
+    /// Permutation used to sort the component set.
+    pub(crate) permutation: Permutation,
+    /// A type-erased function pointer to the [`get_components`] function of
+    /// the component set type.
+    ///
+    /// [`get_components`]: [`ComponentSetInternal::get_components`]
+    pub(crate) get_components: GetComponentsFn,
+}
+
+/// Additional data for [`EventKind::Remove`].
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct RemoveKindInfo {
+    /// The indices of the components to remove.
+    pub(crate) component_indices: ComponentIndices,
 }
 
 /// Data needed to create a new event.
@@ -727,7 +739,7 @@ impl<'a, ES: EventSet> Sender<'a, ES> {
     /// # use evenio::prelude::*;
     /// # #[derive(Component)] struct C;
     /// # fn _f(sender: &mut Sender<Insert<C>>, target: EntityId, component: C) {
-    /// sender.send_to(target, Insert::new(component));
+    /// sender.send_to(target, Insert(component));
     /// # }
     /// ```
     ///
@@ -736,7 +748,7 @@ impl<'a, ES: EventSet> Sender<'a, ES> {
     /// Panics if `Insert<C>` is not in the [`EventSet`] of this sender.
     #[track_caller]
     pub fn insert<C: ComponentSet>(&self, target: EntityId, components: C) {
-        self.send_to(target, Insert::new(components))
+        self.send_to(target, Insert(components))
     }
 
     /// Queue a [`Remove`] event.
@@ -1023,34 +1035,6 @@ fn initialize_component_set<C: ComponentSet>(
     }
 }
 
-/// A [`TargetedEvent`] which adds all components of a set `C` on an entity when
-/// sent. If the entity already has a component, then the component is
-/// replaced.
-///
-/// Any handler which listens for `Insert<C>` will run before the components are
-/// inserted. `Insert<C>` has no effect if the target entity does not exist or
-/// the event is consumed before it finishes broadcasting.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[repr(C)]
-// NOTE: Unsafe code relies on `#[repr(C)]` and the field order.
-pub struct Insert<C> {
-    /// A type-erased function pointer to the [`get_components`] function of
-    /// `C`. Used for calling `get_components` when the type of `C` is unknown.
-    ///
-    /// [`get_components`]: [`ComponentSetInternal::get_components`]
-    // TODO: Move this field to EventKind::Insert, simplifying things a lot.
-    pub(crate) get_components: GetComponentsFn,
-
-    /// The offset of the [`components`] field of this struct, in bytes. Depends
-    /// on the alignment of `C`, since padding is added before the `components`
-    /// field to ensure it is properly aligned. Used for computing a pointer to
-    /// the `components` field when the type of `C` is unknown.
-    pub(crate) components_offset: usize,
-
-    /// The components inserted by this event.
-    pub components: C,
-}
-
 /// Mirrors the signature of [`C::get_components`].
 ///
 /// [`C::get_components`]: [`ComponentSetInternal::get_components`]
@@ -1074,18 +1058,16 @@ fn get_components_fn_of<C: ComponentSet>() -> GetComponentsFn {
     unsafe { transmute(f) }
 }
 
-impl<C: ComponentSet> Insert<C> {
-    /// Constructs a new [`Insert`] event for the given component set.
-    // RustRover's borrow checker inspection doesn't understand offset_of
-    // noinspection RsBorrowChecker
-    pub fn new(components: C) -> Self {
-        Self {
-            get_components: get_components_fn_of::<C>(),
-            components_offset: offset_of!(Self, components),
-            components,
-        }
-    }
-}
+/// A [`TargetedEvent`] which adds all components of a set `C` on an entity when
+/// sent. If the entity already has a component, then the component is
+/// replaced.
+///
+/// Any handler which listens for `Insert<C>` will run before the components are
+/// inserted. `Insert<C>` has no effect if the target entity does not exist or
+/// the event is consumed before it finishes broadcasting.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[repr(transparent)]
+pub struct Insert<C> (pub C);
 
 unsafe impl<C: ComponentSet> Event for Insert<C> {
     type This<'a> = Insert<C>;
@@ -1098,10 +1080,11 @@ unsafe impl<C: ComponentSet> Event for Insert<C> {
         let Ok((permutation, component_indices)) = initialize_component_set::<C>(world) else {
             panic!("component set contains duplicates");
         };
-        EventKind::Insert {
+        EventKind::Insert(InsertKindInfo {
             component_indices,
             permutation,
-        }
+            get_components: get_components_fn_of::<C>(),
+        })
     }
 }
 
@@ -1109,13 +1092,13 @@ impl<C> Deref for Insert<C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        &self.components
+        &self.0
     }
 }
 
 impl<C> DerefMut for Insert<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.components
+        &mut self.0
     }
 }
 
@@ -1180,10 +1163,14 @@ unsafe impl<C: ComponentSet> Event for Remove<C> {
     type Mutability = Mutable;
 
     fn init(world: &mut World) -> EventKind {
+        // TODO: Permutation is not used here. Just sort the component indices
+        //  in place without computing a permutation here?
         let Ok((_permutation, component_indices)) = initialize_component_set::<C>(world) else {
             panic!("component set contains duplicates");
         };
-        EventKind::Remove { component_indices }
+        EventKind::Remove(RemoveKindInfo {
+            component_indices,
+        })
     }
 }
 
