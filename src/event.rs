@@ -451,7 +451,8 @@ unsafe impl<E: TargetedEvent, Q: Query + 'static> HandlerParam for Receiver<'_, 
     fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
         let event_id = world.add_targeted_event::<E>();
 
-        let (ca, state) = Q::init(world, config)?;
+        let state = Q::new_state(world);
+        let ca = Q::init(&state, config)?;
 
         config.set_received_event(event_id);
         config.set_received_event_access(Access::Read);
@@ -572,7 +573,8 @@ where
     fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
         let event_id = world.add_targeted_event::<E>();
 
-        let (ca, state) = Q::init(world, config)?;
+        let state = Q::new_state(world);
+        let ca = Q::init(&state, config)?;
 
         config.set_received_event(event_id);
         config.set_received_event_access(Access::ReadWrite);

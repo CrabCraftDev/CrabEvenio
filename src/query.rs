@@ -72,11 +72,11 @@ pub unsafe trait Query {
     type State: fmt::Debug + 'static;
 
     /// Initialize the query. Returns an expression describing the components
-    /// accessed by the query and a new instance of [`Self::State`].
+    /// accessed by the query.
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError>;
+    ) -> Result<ComponentAccess, InitError>;
 
     /// Returns a new [`Self::State`] instance.
     fn new_state(world: &mut World) -> Self::State;
@@ -121,14 +121,13 @@ unsafe impl<C: Component> Query for &'_ C {
     type State = ComponentIdx;
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let idx = Self::new_state(world);
-        let ca = ComponentAccess::var(idx, Access::Read);
-        config.referenced_components.insert(idx);
+    ) -> Result<ComponentAccess, InitError> {
+        let ca = ComponentAccess::var(*state, Access::Read);
+        config.referenced_components.insert(*state);
 
-        Ok((ca, idx))
+        Ok(ca)
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -158,14 +157,13 @@ unsafe impl<C: Component<Mutability = Mutable>> Query for &'_ mut C {
     type State = ComponentIdx;
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let idx = Self::new_state(world);
-        let ca = ComponentAccess::var(idx, Access::ReadWrite);
-        config.referenced_components.insert(idx);
+    ) -> Result<ComponentAccess, InitError> {
+        let ca = ComponentAccess::var(*state, Access::ReadWrite);
+        config.referenced_components.insert(*state);
 
-        Ok((ca, idx))
+        Ok(ca)
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -197,17 +195,19 @@ macro_rules! impl_query_tuple {
 
             #[allow(unused_mut)]
             fn init(
-                world: &mut World,
+                state: &Self::State,
                 config: &mut HandlerConfig
-            ) -> Result<(ComponentAccess, Self::State), InitError> {
+            ) -> Result<ComponentAccess, InitError> {
+                let ($($q,)*) = state;
+                
                 let mut ca = ComponentAccess::new_true();
 
                 $(
-                    let (this_ca, $q) = $Q::init(world, config)?;
+                    let this_ca = $Q::init($q, config)?;
                     ca = ca.and(&this_ca);
                 )*
 
-                Ok((ca, ($($q,)*)))
+                Ok(ca)
             }
 
             fn new_state(world: &mut World) -> Self::State {
@@ -259,11 +259,11 @@ unsafe impl<Q: Query> Query for Option<Q> {
     type State = Q::State;
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let (ca, state) = Q::init(world, config)?;
-        Ok((ComponentAccess::new_true().or(&ca), state))
+    ) -> Result<ComponentAccess, InitError> {
+        let ca = Q::init(state, config)?;
+        Ok(ComponentAccess::new_true().or(&ca))
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -341,15 +341,17 @@ where
     type State = (L::State, R::State);
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let (ca_lhs, state_lhs) = L::init(world, config)?;
-        let (ca_rhs, state_rhs) = R::init(world, config)?;
+    ) -> Result<ComponentAccess, InitError> {
+        let (state_lhs, state_rhs) = state;
+        
+        let ca_lhs = L::init(state_lhs, config)?;
+        let ca_rhs = R::init(state_rhs, config)?;
 
         let ca_both = ca_lhs.and(&ca_rhs);
 
-        Ok((ca_lhs.or(&ca_rhs).or(&ca_both), (state_lhs, state_rhs)))
+        Ok(ca_lhs.or(&ca_rhs).or(&ca_both))
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -438,16 +440,15 @@ where
     type State = (L::State, R::State);
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let (ca_lhs, state_lhs) = L::init(world, config)?;
-        let (ca_rhs, state_rhs) = R::init(world, config)?;
+    ) -> Result<ComponentAccess, InitError> {
+        let (state_lhs, state_rhs) = state;
+        
+        let ca_lhs = L::init(state_lhs, config)?;
+        let ca_rhs = R::init(state_rhs, config)?;
 
-        Ok((
-            ca_lhs.and(&ca_rhs.not()).or(&ca_rhs.and(&ca_lhs.not())),
-            (state_lhs, state_rhs),
-        ))
+        Ok(ca_lhs.and(&ca_rhs.not()).or(&ca_rhs.and(&ca_lhs.not())))
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -528,12 +529,12 @@ unsafe impl<Q: Query> Query for Not<Q> {
     type State = Q::State;
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let (ca, state) = Q::init(world, config)?;
+    ) -> Result<ComponentAccess, InitError> {
+        let ca = Q::init(state, config)?;
 
-        Ok((ca.not(), state))
+        Ok(ca.not())
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -602,14 +603,14 @@ unsafe impl<Q: Query> Query for With<Q> {
     type State = Q::State;
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let (mut ca, state) = Q::init(world, config)?;
+    ) -> Result<ComponentAccess, InitError> {
+        let mut ca = Q::init(state, config)?;
 
         ca.clear_access();
 
-        Ok((ca, state))
+        Ok(ca)
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -726,12 +727,12 @@ unsafe impl<Q: Query> Query for Has<Q> {
     type State = Q::State;
 
     fn init(
-        world: &mut World,
+        state: &Self::State,
         config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        let (_, state) = Q::init(world, config)?;
+    ) -> Result<ComponentAccess, InitError> {
+        let _ = Q::init(state, config)?;
 
-        Ok((ComponentAccess::new_true(), state))
+        Ok(ComponentAccess::new_true())
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -762,10 +763,10 @@ unsafe impl Query for EntityId {
     type State = ();
 
     fn init(
-        _world: &mut World,
+        _state: &Self::State,
         _config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        Ok((ComponentAccess::new_true(), ()))
+    ) -> Result<ComponentAccess, InitError> {
+        Ok(ComponentAccess::new_true())
     }
 
     fn new_state(_world: &mut World) -> Self::State {}
@@ -796,10 +797,10 @@ unsafe impl<T: ?Sized> Query for PhantomData<T> {
     type State = ();
 
     fn init(
-        _world: &mut World,
+        _state: &Self::State,
         _config: &mut HandlerConfig,
-    ) -> Result<(ComponentAccess, Self::State), InitError> {
-        Ok((ComponentAccess::new_true(), ()))
+    ) -> Result<ComponentAccess, InitError> {
+        Ok(ComponentAccess::new_true())
     }
 
     fn new_state(_world: &mut World) -> Self::State {}

@@ -121,11 +121,11 @@ pub(crate) fn derive_query(input: TokenStream) -> Result<TokenStream> {
             type State = <#tuple_ty as ::evenio::query::Query>::State;
 
             fn init(
-                world: &mut ::evenio::world::World,
+                state: &Self::State,
                 config: &mut ::evenio::handler::HandlerConfig
-            ) -> ::core::result::Result<(::evenio::access::ComponentAccess, Self::State), ::evenio::handler::InitError>
+            ) -> ::core::result::Result<::evenio::access::ComponentAccess, ::evenio::handler::InitError>
             {
-                <#tuple_ty as ::evenio::query::Query>::init(world, config)
+                <#tuple_ty as ::evenio::query::Query>::init(state, config)
             }
 
             fn new_state(world: &mut ::evenio::world::World) -> Self::State {
