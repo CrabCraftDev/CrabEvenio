@@ -86,7 +86,7 @@ pub unsafe trait Query {
     fn get_new_state(world: &World) -> Option<Self::State>;
 
     /// Returns a new [`Self::ArchState`] instance.
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState>;
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState>;
 
     /// Gets the query item at the given row in the archetype.
     ///
@@ -137,7 +137,7 @@ unsafe impl<C: Component> Query for &'_ C {
         world.components().get_by_type_id(TypeId::of::<C>()).map(|info| info.id().index())
     }
 
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
         arch.column_of(*state).map(|c| ColumnPtr(c.data().cast()))
     }
 
@@ -172,7 +172,7 @@ unsafe impl<C: Component<Mutability = Mutable>> Query for &'_ mut C {
         world.components().get_by_type_id(TypeId::of::<C>()).map(|info| info.id().index())
     }
 
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
         <&C>::new_arch_state(arch, state)
     }
 
@@ -224,7 +224,7 @@ macro_rules! impl_query_tuple {
                 ))
             }
 
-            fn new_arch_state(arch: &Archetype, ($($q,)*): &mut Self::State) -> Option<Self::ArchState> {
+            fn new_arch_state(arch: &Archetype, ($($q,)*): &Self::State) -> Option<Self::ArchState> {
                 Some((
                     $(
                         $Q::new_arch_state(arch, $q)?,
@@ -272,7 +272,7 @@ unsafe impl<Q: Query> Query for Option<Q> {
         Q::get_new_state(world)
     }
 
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
         Some(Q::new_arch_state(arch, state))
     }
 
@@ -362,7 +362,7 @@ where
 
     fn new_arch_state(
         arch: &Archetype,
-        (left_state, right_state): &mut Self::State,
+        (left_state, right_state): &Self::State,
     ) -> Option<Self::ArchState> {
         match (
             L::new_arch_state(arch, left_state),
@@ -459,7 +459,7 @@ where
 
     fn new_arch_state(
         arch: &Archetype,
-        (left_state, right_state): &mut Self::State,
+        (left_state, right_state): &Self::State,
     ) -> Option<Self::ArchState> {
         match (
             L::new_arch_state(arch, left_state),
@@ -543,7 +543,7 @@ unsafe impl<Q: Query> Query for Not<Q> {
         Q::get_new_state(world)
     }
 
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
         match Q::new_arch_state(arch, state) {
             Some(_) => None,
             None => Some(()),
@@ -619,7 +619,7 @@ unsafe impl<Q: Query> Query for With<Q> {
         Q::get_new_state(world)
     }
 
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
         Q::new_arch_state(arch, state).map(|_| ())
     }
 
@@ -741,7 +741,7 @@ unsafe impl<Q: Query> Query for Has<Q> {
         Q::get_new_state(world)
     }
 
-    fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
         Some(Q::new_arch_state(arch, state).is_some())
     }
 
@@ -773,7 +773,7 @@ unsafe impl Query for EntityId {
         Some(())
     }
 
-    fn new_arch_state(arch: &Archetype, (): &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(arch: &Archetype, (): &Self::State) -> Option<Self::ArchState> {
         Some(unsafe {
             ColumnPtr(NonNull::new(arch.entity_ids().as_ptr().cast_mut()).unwrap_unchecked())
         })
@@ -807,7 +807,7 @@ unsafe impl<T: ?Sized> Query for PhantomData<T> {
         Some(())
     }
 
-    fn new_arch_state(_arch: &Archetype, _state: &mut Self::State) -> Option<Self::ArchState> {
+    fn new_arch_state(_arch: &Archetype, _state: &Self::State) -> Option<Self::ArchState> {
         Some(())
     }
 
