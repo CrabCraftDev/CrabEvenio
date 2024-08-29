@@ -452,7 +452,9 @@ unsafe impl<E: TargetedEvent, Q: Query + 'static> HandlerParam for Receiver<'_, 
         let event_id = world.add_targeted_event::<E>();
 
         let state = Q::new_state(world);
-        let ca = Q::init(&state, config)?;
+        let ca = Q::init(&state, |idx| {
+            config.referenced_components.insert(idx);
+        });
 
         config.set_received_event(event_id);
         config.set_received_event_access(Access::Read);
@@ -574,7 +576,9 @@ where
         let event_id = world.add_targeted_event::<E>();
 
         let state = Q::new_state(world);
-        let ca = Q::init(&state, config)?;
+        let ca = Q::init(&state, |idx| {
+            config.referenced_components.insert(idx);
+        });
 
         config.set_received_event(event_id);
         config.set_received_event_access(Access::ReadWrite);
@@ -1075,7 +1079,7 @@ fn get_components_fn_of<C: ComponentSet>() -> GetComponentsFn {
 /// the event is consumed before it finishes broadcasting.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[repr(transparent)]
-pub struct Insert<C> (pub C);
+pub struct Insert<C>(pub C);
 
 unsafe impl<C: ComponentSet> Event for Insert<C> {
     type This<'a> = Insert<C>;
@@ -1176,9 +1180,7 @@ unsafe impl<C: ComponentSet> Event for Remove<C> {
         let Ok((_permutation, component_indices)) = initialize_component_set::<C>(world) else {
             panic!("component set contains duplicates");
         };
-        EventKind::Remove(RemoveKindInfo {
-            component_indices,
-        })
+        EventKind::Remove(RemoveKindInfo { component_indices })
     }
 }
 

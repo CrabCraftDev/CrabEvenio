@@ -15,7 +15,6 @@ use crate::access::{Access, ComponentAccess};
 use crate::archetype::{Archetype, ArchetypeRow};
 use crate::component::{Component, ComponentIdx};
 use crate::entity::EntityId;
-use crate::handler::{HandlerConfig, InitError};
 use crate::mutability::Mutable;
 use crate::world::World;
 
@@ -71,12 +70,13 @@ pub unsafe trait Query {
     /// Cached data for fetch initialization, e.g. component indices.
     type State: fmt::Debug + 'static;
 
-    /// Initialize the query. Returns an expression describing the components
-    /// accessed by the query.
+    /// Initializes the query. Returns an expression describing the components
+    /// accessed by the query and calls `add_referenced_component` with each
+    /// component the query references.
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError>;
+        add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess;
 
     /// Returns a new [`Self::State`] instance.
     fn new_state(world: &mut World) -> Self::State;
@@ -122,12 +122,11 @@ unsafe impl<C: Component> Query for &'_ C {
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
         let ca = ComponentAccess::var(*state, Access::Read);
-        config.referenced_components.insert(*state);
-
-        Ok(ca)
+        add_referenced_component(*state);
+        ca
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -158,12 +157,11 @@ unsafe impl<C: Component<Mutability = Mutable>> Query for &'_ mut C {
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
         let ca = ComponentAccess::var(*state, Access::ReadWrite);
-        config.referenced_components.insert(*state);
-
-        Ok(ca)
+        add_referenced_component(*state);
+        ca
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -196,18 +194,18 @@ macro_rules! impl_query_tuple {
             #[allow(unused_mut)]
             fn init(
                 state: &Self::State,
-                config: &mut HandlerConfig
-            ) -> Result<ComponentAccess, InitError> {
+                mut add_referenced_component: impl FnMut(ComponentIdx),
+            ) -> ComponentAccess {
                 let ($($q,)*) = state;
-                
+
                 let mut ca = ComponentAccess::new_true();
 
                 $(
-                    let this_ca = $Q::init($q, config)?;
+                    let this_ca = $Q::init($q, &mut add_referenced_component);
                     ca = ca.and(&this_ca);
                 )*
 
-                Ok(ca)
+                ca
             }
 
             fn new_state(world: &mut World) -> Self::State {
@@ -260,10 +258,10 @@ unsafe impl<Q: Query> Query for Option<Q> {
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
-        let ca = Q::init(state, config)?;
-        Ok(ComponentAccess::new_true().or(&ca))
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
+        let ca = Q::init(state, &mut add_referenced_component);
+        ComponentAccess::new_true().or(&ca)
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -342,16 +340,16 @@ where
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
         let (state_lhs, state_rhs) = state;
-        
-        let ca_lhs = L::init(state_lhs, config)?;
-        let ca_rhs = R::init(state_rhs, config)?;
+
+        let ca_lhs = L::init(state_lhs, &mut add_referenced_component);
+        let ca_rhs = R::init(state_rhs, &mut add_referenced_component);
 
         let ca_both = ca_lhs.and(&ca_rhs);
 
-        Ok(ca_lhs.or(&ca_rhs).or(&ca_both))
+        ca_lhs.or(&ca_rhs).or(&ca_both)
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -441,14 +439,14 @@ where
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
         let (state_lhs, state_rhs) = state;
-        
-        let ca_lhs = L::init(state_lhs, config)?;
-        let ca_rhs = R::init(state_rhs, config)?;
 
-        Ok(ca_lhs.and(&ca_rhs.not()).or(&ca_rhs.and(&ca_lhs.not())))
+        let ca_lhs = L::init(state_lhs, &mut add_referenced_component);
+        let ca_rhs = R::init(state_rhs, &mut add_referenced_component);
+
+        ca_lhs.and(&ca_rhs.not()).or(&ca_rhs.and(&ca_lhs.not()))
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -530,11 +528,11 @@ unsafe impl<Q: Query> Query for Not<Q> {
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
-        let ca = Q::init(state, config)?;
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
+        let ca = Q::init(state, &mut add_referenced_component);
 
-        Ok(ca.not())
+        ca.not()
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -604,13 +602,13 @@ unsafe impl<Q: Query> Query for With<Q> {
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
-        let mut ca = Q::init(state, config)?;
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
+        let mut ca = Q::init(state, &mut add_referenced_component);
 
         ca.clear_access();
 
-        Ok(ca)
+        ca
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -728,11 +726,11 @@ unsafe impl<Q: Query> Query for Has<Q> {
 
     fn init(
         state: &Self::State,
-        config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
-        let _ = Q::init(state, config)?;
+        mut add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
+        let _ = Q::init(state, &mut add_referenced_component);
 
-        Ok(ComponentAccess::new_true())
+        ComponentAccess::new_true()
     }
 
     fn new_state(world: &mut World) -> Self::State {
@@ -764,9 +762,9 @@ unsafe impl Query for EntityId {
 
     fn init(
         _state: &Self::State,
-        _config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
-        Ok(ComponentAccess::new_true())
+        _add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
+        ComponentAccess::new_true()
     }
 
     fn new_state(_world: &mut World) -> Self::State {}
@@ -798,9 +796,9 @@ unsafe impl<T: ?Sized> Query for PhantomData<T> {
 
     fn init(
         _state: &Self::State,
-        _config: &mut HandlerConfig,
-    ) -> Result<ComponentAccess, InitError> {
-        Ok(ComponentAccess::new_true())
+        _add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> ComponentAccess {
+        ComponentAccess::new_true()
     }
 
     fn new_state(_world: &mut World) -> Self::State {}

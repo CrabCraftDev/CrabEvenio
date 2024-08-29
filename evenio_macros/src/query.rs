@@ -122,10 +122,10 @@ pub(crate) fn derive_query(input: TokenStream) -> Result<TokenStream> {
 
             fn init(
                 state: &Self::State,
-                config: &mut ::evenio::handler::HandlerConfig
-            ) -> ::core::result::Result<::evenio::access::ComponentAccess, ::evenio::handler::InitError>
+                add_referenced_component: impl FnMut(::evenio::component::ComponentIdx),
+            ) -> ::evenio::access::ComponentAccess
             {
-                <#tuple_ty as ::evenio::query::Query>::init(state, config)
+                <#tuple_ty as ::evenio::query::Query>::init(state, add_referenced_component)
             }
 
             fn new_state(world: &mut ::evenio::world::World) -> Self::State {
