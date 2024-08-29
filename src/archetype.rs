@@ -1,24 +1,21 @@
 //! [`Archetype`] and related items.
 
-use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec, vec::Vec};
-use core::alloc::Layout;
 use core::hash::Hash;
-use core::mem::transmute;
 use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr::NonNull;
-use core::{fmt, mem, ptr, slice};
-
+use core::{fmt, mem, slice};
 use ahash::RandomState;
 use slab::Slab;
 
 use crate::assume_unchecked;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
 use crate::component_indices::{ComponentIndices, ComponentIndicesPtr};
-use crate::drop::DropFn;
+use crate::data_store::DataStore;
+use crate::data_type::DataType;
 use crate::entity::{Entities, EntityId, EntityLocation};
 use crate::event::{EventId, EventPtr, TargetedEventIdx};
 use crate::handler::{
@@ -114,12 +111,12 @@ impl Archetypes {
         // Add the entity to the empty archetype. This does not involve adding
         // components, as the empty archetype does not have columns. Only the
         // spawned entity's id needs to be stored.
-        let row = ArchetypeRow(empty.entity_count());
+        let row = ArchetypeRow(empty.len() as u32);
         empty.entity_ids.push(id);
 
         // If the archetype was empty or has been reallocated, notify the
         // listening handlers of this change.
-        if empty.entity_count() == 1 || reallocated {
+        if empty.len() == 1 || reallocated {
             for mut ptr in empty.refresh_listeners.iter().copied() {
                 unsafe { ptr.as_info_mut().handler_mut().refresh_archetype(empty) };
             }
@@ -303,7 +300,9 @@ impl Archetypes {
 
                 // Replace the old component with the new component of the same
                 // type.
-                col.assign(src.row.0 as usize, comp_ptr);
+                let index = src.row.0 as usize;
+                col.drop(index);
+                col.insert(index, comp_ptr);
             }
 
             return src.row;
@@ -724,6 +723,7 @@ impl Archetypes {
         use handle_components::OldComponentState::*;
         use handle_components::Process;
         use handle_components::ProcessState::*;
+        use crate::data_store::DataStore;
 
         let mut process = Process::new(
             src_arch.component_indices(),
@@ -732,6 +732,12 @@ impl Archetypes {
         );
 
         loop {
+            let src_row = src.row.0 as usize;
+            let src_last_row = src_arch.len() - 1;
+            let dst_row = dst_arch.len();
+
+            // TODO: Document precisely the operations below.
+
             match process.state() {
                 InProgress(_, ExcessNew) | DoneWithExcessNew => {
                     panic!("move_entity called with excess new components");
@@ -740,61 +746,40 @@ impl Archetypes {
                     panic!("move_entity called with new components missing");
                 }
                 InProgress(RemoveFromSource, _) => {
-                    let src_col = &mut *src_arch.columns.as_ptr().add(process.src_idx());
-                    src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
+                    let src_col = &*src_arch.get_ptr(process.src_idx());
+
+                    src_col.drop(src_row);
+                    src_col.move_within(src_last_row, src_row);
 
                     process.removed_component();
                 }
                 InProgress(TransferOrReplace, NewComponentUnavailable) => {
-                    let src_col = &mut *src_arch.columns.as_ptr().add(process.src_idx());
-                    let dst_col = &mut *dst_arch.columns.as_ptr().add(process.dst_idx());
+                    let src_col = &*src_arch.get_ptr(process.src_idx());
+                    let dst_col = &*dst_arch.get_ptr(process.dst_idx());
 
-                    src_col.transfer_elem(
-                        src_arch.entity_ids.len(),
-                        dst_col,
-                        dst_arch.entity_ids.len(),
-                        src.row.0 as usize,
-                    );
+                    DataStore::transfer(src_col, dst_col, src_row, dst_row);
+
+                    src_col.move_within(src_last_row, src_row);
 
                     process.transferred_component();
                 }
                 InProgress(TransferOrReplace, AddNew) => {
-                    let src_col = &mut *src_arch.columns.as_ptr().add(process.src_idx());
-                    let dst_col = &mut *dst_arch.columns.as_ptr().add(process.dst_idx());
-
-                    src_col.swap_remove(src_arch.entity_ids.len(), src.row.0 as usize);
-
+                    let src_col = &*src_arch.get_ptr(process.src_idx());
+                    let dst_col = &*dst_arch.get_ptr(process.dst_idx());
                     let new_component = new_component_pointers[process.new_idx()];
 
-                    let dst_ptr = dst_col
-                        .data
-                        .as_ptr()
-                        .add(dst_col.component_layout.size() * dst_arch.entity_ids.len());
+                    src_col.drop(src_row);
+                    src_col.move_within(src_last_row, src_row);
 
-                    // Insert the new component into the destination column.
-                    ptr::copy_nonoverlapping(
-                        new_component,
-                        dst_ptr,
-                        dst_col.component_layout.size(),
-                    );
+                    dst_col.insert(dst_row, new_component);
 
                     process.replaced_component();
                 }
                 InProgress(OldComponentUnavailable, AddNew) => {
-                    let dst_col = &mut *dst_arch.columns.as_ptr().add(process.dst_idx());
-
+                    let dst_col = &*dst_arch.get_ptr(process.dst_idx());
                     let new_component = new_component_pointers[process.new_idx()];
 
-                    let dst_ptr = dst_col
-                        .data
-                        .as_ptr()
-                        .add(dst_col.component_layout.size() * dst_arch.entity_ids.len());
-
-                    ptr::copy_nonoverlapping(
-                        new_component,
-                        dst_ptr,
-                        dst_col.component_layout.size(),
-                    );
+                    dst_col.insert(dst_row, new_component);
 
                     process.added_component();
                 }
@@ -829,7 +814,7 @@ impl Archetypes {
 
         // If the destination archetype was empty before or has been
         // reallocated, notify the listening handlers of this change.
-        if dst_arch_reallocated || dst_arch.entity_count() == 1 {
+        if dst_arch_reallocated || dst_arch.len() == 1 {
             for mut ptr in dst_arch.refresh_listeners.iter().copied() {
                 unsafe { ptr.as_info_mut().handler_mut().refresh_archetype(dst_arch) };
             }
@@ -851,21 +836,25 @@ impl Archetypes {
                 .unwrap_unchecked()
         };
 
-        let initial_len = arch.entity_ids.len();
+        let initial_len = arch.len();
+        let row = loc.row.0 as usize;
 
         // Remove the entity's components.
         for col in arch.columns_mut() {
-            unsafe { col.swap_remove(initial_len, loc.row.0 as usize) };
+            unsafe {
+                col.drop(row);
+                col.move_within(initial_len - 1, row);
+            };
         }
 
         // Eliminate the bounds check in `swap_remove`.
         // SAFETY: Caller guaranteed that the location is valid.
         unsafe {
-            assume_unchecked((loc.row.0 as usize) < arch.entity_ids.len());
+            assume_unchecked(row < arch.len());
         };
 
         // Remove the entity id from the archetype.
-        let id = arch.entity_ids.swap_remove(loc.row.0 as usize);
+        let id = arch.entity_ids.swap_remove(row);
 
         // Remove the entity location.
         let removed_loc = unsafe { entities.remove(id).unwrap_unchecked() };
@@ -876,15 +865,15 @@ impl Archetypes {
         // the place of the removed entity by the swap-remove operation, unless
         // the last entity in the archetype was removed, in which case this is
         // not necessary.
-        if (loc.row.0 as usize) < arch.entity_ids.len() {
-            let displaced = *unsafe { arch.entity_ids.get_unchecked(loc.row.0 as usize) };
+        if row < arch.len() {
+            let displaced = *unsafe { arch.entity_ids.get_unchecked(row) };
             unsafe { entities.get_mut(displaced).unwrap_unchecked() }.row = loc.row;
         }
 
         // If the removed entity's archetype no longer has any entities, notify
         // all handlers listening for updates affecting the archetype of this
         // change.
-        if arch.entity_count() == 0 {
+        if arch.len() == 0 {
             for mut ptr in arch.refresh_listeners.iter().copied() {
                 unsafe { ptr.as_info_mut().handler_mut().remove_archetype(arch) };
             }
@@ -985,7 +974,7 @@ pub struct Archetype {
     ///
     /// This is a `Box<[Column]>` with the length stripped out. The length field
     /// would be redundant since it's always the same as `component_indices`.
-    columns: NonNull<Column>,
+    columns: NonNull<DataStore>,
     /// A special column containing the [`EntityId`] for all entities in the
     /// archetype.
     entity_ids: Vec<EntityId>,
@@ -1020,7 +1009,7 @@ impl Archetype {
     ) -> Self {
         // Create a column for each component and register this archetype in the
         // component infos.
-        let columns: Box<[Column]> = component_indices
+        let columns: Box<[DataStore]> = component_indices
             .iter()
             .map(|&idx| {
                 // SAFETY: Caller guaranteed the component indices are valid.
@@ -1029,25 +1018,23 @@ impl Archetype {
                 // Register this archetype.
                 info.member_of.insert(arch_idx);
 
+                let element_type = DataType {
+                    // TODO: Store a DataType in `ComponentInfo`?
+                    layout: info.layout(),
+                    drop_fn: info.drop(),
+                    #[cfg(debug_assertions)]
+                    type_id: info.type_id(),
+                    #[cfg(debug_assertions)]
+                    type_name: None,
+                };
+
                 // Construct the column.
-                Column {
-                    component_layout: info.layout(),
-                    data: unsafe {
-                        // Create a dangling pointer that is correctly aligned.
-                        // Correct alignment is necessary as we create borrows
-                        // from this pointer, which have to *always* be aligned.
-                        // TODO: Use `Layout::dangling` once it's stabilized.
-                        // SAFETY: The alignment is guaranteed to be non-zero,
-                        // so the pointer cannot be null.
-                        NonNull::new_unchecked(transmute(info.layout().align()))
-                    },
-                    drop: info.drop(),
-                }
+                DataStore::new(element_type)
             })
             .collect();
 
         // SAFETY: `Box::into_raw` guarantees non-null.
-        let columns_ptr = unsafe { NonNull::new_unchecked(Box::into_raw(columns) as *mut Column) };
+        let columns_ptr = unsafe { NonNull::new_unchecked(Box::into_raw(columns) as *mut DataStore) };
 
         Self {
             index: arch_idx,
@@ -1069,7 +1056,7 @@ impl Archetype {
             .matches_archetype(|idx| self.column_of(idx).is_some())
         {
             // Don't call `refresh_archetype` if this archetype is empty.
-            if self.entity_count() > 0 {
+            if self.len() > 0 {
                 info.handler_mut().refresh_archetype(self);
             }
 
@@ -1109,10 +1096,8 @@ impl Archetype {
     }
 
     /// Returns the total number of entities in this archetype.
-    pub fn entity_count(&self) -> u32 {
-        debug_assert!(u32::try_from(self.entity_ids.len()).is_ok());
-        // This doesn't truncate because entity indices are less than u32::MAX.
-        self.entity_ids.len() as u32
+    pub fn len(&self) -> usize {
+        self.entity_ids.len()
     }
 
     /// Returns a slice of [`EntityId`]s for all the entities in this archetype.
@@ -1130,29 +1115,29 @@ impl Archetype {
     }
 
     /// Returns a slice of columns sorted by [`ComponentIdx`].
-    pub fn columns(&self) -> &[Column] {
+    pub(crate) fn columns(&self) -> &[DataStore] {
         unsafe { slice::from_raw_parts(self.columns.as_ptr(), self.component_indices.len()) }
     }
 
     /// Returns a slice of columns sorted by [`ComponentIdx`].
-    fn columns_mut(&mut self) -> &mut [Column] {
+    pub(crate) fn columns_mut(&mut self) -> &mut [DataStore] {
         unsafe { slice::from_raw_parts_mut(self.columns.as_ptr(), self.component_indices.len()) }
     }
 
     /// Finds the column with the given component. Returns `None` if it doesn't
     /// exist.
-    pub fn column_of(&self, idx: ComponentIdx) -> Option<&Column> {
+    pub(crate) fn column_of(&self, idx: ComponentIdx) -> Option<&DataStore> {
         let idx = self.component_indices().binary_search(&idx).ok()?;
 
         // SAFETY: `binary_search` ensures `idx` is in bounds.
-        Some(unsafe { &*self.columns.as_ptr().add(idx) })
+        Some(unsafe { &*self.get_ptr(idx) })
     }
 
-    fn column_of_mut(&mut self, idx: ComponentIdx) -> Option<&mut Column> {
+    pub(crate) fn column_of_mut(&mut self, idx: ComponentIdx) -> Option<&mut DataStore> {
         let idx = self.component_indices().binary_search(&idx).ok()?;
 
         // SAFETY: `binary_search` ensures `idx` is in bounds.
-        Some(unsafe { &mut *self.columns.as_ptr().add(idx) })
+        Some(unsafe { &mut *self.get_ptr(idx) })
     }
 
     /// Reserve space for at least one additional entity in this archetype. Has
@@ -1166,11 +1151,6 @@ impl Archetype {
         self.entity_ids.reserve(1);
         // Non-zero because we just reserved space for one element.
         let new_cap = self.entity_ids.capacity();
-
-        #[cold]
-        fn capacity_overflow() -> ! {
-            panic!("capacity overflow in archetype column")
-        }
 
         if old_cap == new_cap {
             // No reallocation occurred.
@@ -1195,53 +1175,17 @@ impl Archetype {
 
         // Reallocate all columns.
         for col in self.columns_mut() {
-            if col.component_layout.size() == 0 {
-                // Skip zero-sized types.
-                continue;
-            }
-
-            // Non-zero: checked product of two non-zero values.
-            let Some(new_cap_in_bytes) = new_cap.checked_mul(col.component_layout.size()) else {
-                capacity_overflow()
-            };
-
-            if new_cap_in_bytes > isize::MAX as usize {
-                capacity_overflow()
-            }
-
-            // SAFETY: Alignment requirements checked when
-            // `col.component_layout` was constructed. Size requirements were
-            // just checked (under the assumption that the size is a multiple of
-            // the alignment).
-            let new_cap_layout =
-                Layout::from_size_align_unchecked(new_cap_in_bytes, col.component_layout.align());
-
-            let ptr = if old_cap == 0 {
-                // SAFETY: We checked size > 0 above.
-                alloc(new_cap_layout)
-            } else {
-                // SAFETY: Previous layout must have been valid.
-                let old_cap_layout = Layout::from_size_align_unchecked(
-                    old_cap * col.component_layout.size(),
-                    col.component_layout.align(),
-                );
-
-                // SAFETY: `old_cap_layout` is the layout used for the last
-                // allocation, from which `col.data.as_ptr()` was returned.
-                // `new_cap_in_bytes` was checked to be in bounds (see above).
-                realloc(col.data.as_ptr(), old_cap_layout, new_cap_in_bytes)
-            };
-
-            match NonNull::new(ptr) {
-                Some(ptr) => col.data = ptr,
-                None => handle_alloc_error(new_cap_layout),
-            }
+            col.reallocate(old_cap, new_cap);
         }
 
         // Forget the scope guard to avoid a spurious panic.
         mem::forget(guard);
 
         true
+    }
+
+    unsafe fn get_ptr(&self, idx: usize) -> *mut DataStore {
+        self.columns.as_ptr().add(idx)
     }
 }
 
@@ -1258,26 +1202,13 @@ impl Drop for Archetype {
         let cap = self.entity_ids.capacity();
 
         for col in columns.iter_mut() {
-            let cap_layout = unsafe {
-                Layout::from_size_align_unchecked(
-                    cap * col.component_layout.size(),
-                    col.component_layout.align(),
-                )
-            };
-            if cap_layout.size() > 0 {
-                // Drop components.
-                if let Some(drop) = col.drop {
-                    for i in 0..len {
-                        unsafe {
-                            let ptr = col.data.as_ptr().add(i * col.component_layout.size());
-                            drop(NonNull::new_unchecked(ptr));
-                        };
-                    }
-                }
-
-                // Free backing buffer.
-                unsafe { dealloc(col.data.as_ptr(), cap_layout) };
+            // Drop components.
+            for i in 0..len {
+                unsafe { col.drop(i) };
             }
+
+            // Free backing buffer.
+            unsafe { col.deallocate(cap); }
         }
     }
 }
@@ -1303,166 +1234,6 @@ impl fmt::Debug for Archetype {
             .finish()
     }
 }
-
-/// All of the component data for a single component type in an [`Archetype`].
-#[derive(Debug)]
-pub struct Column {
-    /// Layout of a single element.
-    component_layout: Layout,
-    /// Pointer to beginning of allocated buffer.
-    data: NonNull<u8>,
-    /// The component drop function.
-    drop: DropFn,
-}
-
-impl Column {
-    /// Returns a pointer to the beginning of the buffer holding the component
-    /// data, or a dangling pointer if the buffer is empty.
-    pub fn data(&self) -> NonNull<u8> {
-        self.data
-    }
-
-    /// Overwrites the element at `idx` with the data at `elem`, which this
-    /// method takes ownership of.
-    ///
-    /// # Safety
-    ///
-    /// - `idx` must be in bounds
-    /// - `elem` must point to a component of the correct type
-    /// - `elem` must not alias `&mut self`
-    unsafe fn assign(&mut self, idx: usize, elem: *const u8) {
-        // Obtain raw pointer to the overwritten element using pointer
-        // arithmetic. SAFETY: Caller guaranteed `idx` is in bounds.
-        let ptr = self.data.as_ptr().add(idx * self.component_layout.size());
-
-        // Call drop function on the overwritten element, if it exists.
-        if let Some(drop) = self.drop {
-            drop(NonNull::new_unchecked(ptr));
-        }
-
-        // Copy the passed element into the buffer to overwrite the old element.
-        ptr::copy_nonoverlapping(elem, ptr, self.component_layout.size());
-    }
-
-    /// Removes the element at `idx` and immediately moves the last element (at
-    /// index `len - 1`) into the empty space.
-    ///
-    /// # Safety
-    ///
-    /// - `idx` must be in bounds
-    /// - `len` must be correct
-    unsafe fn swap_remove(&mut self, len: usize, idx: usize) {
-        debug_assert!(idx < len, "index out of bounds");
-
-        // Obtain raw pointer to the last element using pointer arithmetic.
-        // SAFETY: Caller guaranteed `len` is correct, meaning `len - 1` is in
-        // bounds.
-        let src = self
-            .data
-            .as_ptr()
-            .add(self.component_layout.size() * (len - 1));
-
-        // Obtain raw pointer to the removed element using pointer arithmetic.
-        // SAFETY: Caller guaranteed `idx` is in bounds.
-        let dst = self.data.as_ptr().add(self.component_layout.size() * idx);
-
-        // Call drop function on the overwritten element, if it exists.
-        if let Some(drop) = self.drop {
-            drop(NonNull::new_unchecked(dst));
-        }
-
-        // Copy the last element into the buffer to overwrite the removed
-        // element, unless the two elements are equal. This means that the last
-        // element of the column was removed, and nothing more needs to be done.
-        if src != dst {
-            ptr::copy_nonoverlapping(src, dst, self.component_layout.size());
-        }
-    }
-
-    /// Moves the last element (at index `len - 1`) to `idx`, without dropping
-    /// the element at `idx`.
-    ///
-    /// # Safety
-    ///
-    /// - `idx` must be in bounds
-    /// - `len` must be correct
-    unsafe fn swap_remove_no_drop(&mut self, len: usize, idx: usize) {
-        debug_assert!(idx < len, "index out of bounds");
-
-        // Obtain raw pointer to the last element using pointer arithmetic.
-        // SAFETY: Caller guaranteed `len` is correct, meaning `len - 1` is in
-        // bounds.
-        let src = self
-            .data
-            .as_ptr()
-            .add(self.component_layout.size() * (len - 1));
-
-        // Obtain raw pointer to the removed element using pointer arithmetic.
-        // SAFETY: Caller guaranteed `idx` is in bounds.
-        let dst = self.data.as_ptr().add(self.component_layout.size() * idx);
-
-        // Copy the last element into the buffer to overwrite the removed
-        // element, unless the two elements are equal. This means that the last
-        // element of the column was removed, and nothing more needs to be done.
-        if src != dst {
-            ptr::copy_nonoverlapping(src, dst, self.component_layout.size());
-        }
-    }
-
-    /// Moves the element at `src_idx` from `self` to `other`.
-    ///
-    /// # Safety
-    ///
-    /// - `self` and `other` must store components of the same type
-    /// - `self_len` and `other_len` must be correct
-    /// - `src_idx` must be in bounds of `self`
-    /// - `other` must have space allocated for the element to be moved to index
-    ///   `other_len`
-    unsafe fn transfer_elem(
-        &mut self,
-        self_len: usize,
-        other: &mut Self,
-        other_len: usize,
-        src_idx: usize,
-    ) {
-        debug_assert_eq!(
-            self.component_layout, other.component_layout,
-            "component layouts must be the same"
-        );
-        debug_assert!(src_idx < self_len, "index out of bounds");
-
-        // Obtain raw pointer to the moved element using pointer arithmetic.
-        // SAFETY: Caller guaranteed `src_idx` is in bounds.
-        let src = self
-            .data
-            .as_ptr()
-            .add(src_idx * self.component_layout.size());
-
-        // Obtain raw pointer to the move destination using pointer arithmetic.
-        // SAFETY: Caller guaranteed `other_len` is part of `other`'s
-        // allocation.
-        let dst = other
-            .data
-            .as_ptr()
-            .add(other_len * other.component_layout.size());
-
-        // Copy the element.
-        ptr::copy_nonoverlapping(src, dst, self.component_layout.size());
-
-        // Remove the moved element from our buffer without dropping it, because
-        // it is now owned by `other`.
-        self.swap_remove_no_drop(self_len, src_idx);
-    }
-}
-
-// SAFETY: The safe API of `Column` is thread safe, since `unsafe` is
-// required to actually read or write the column data.
-unsafe impl Send for Column {}
-unsafe impl Sync for Column {}
-
-// Similar logic as above follows for these impls.
-impl UnwindSafe for Column {}
-impl RefUnwindSafe for Column {}
 
 #[cfg(test)]
 mod tests {

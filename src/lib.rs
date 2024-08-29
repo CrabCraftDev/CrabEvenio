@@ -18,6 +18,8 @@ mod boxed_slice;
 pub mod component;
 pub mod component_indices;
 mod component_set_internals;
+mod data_store;
+mod data_type;
 pub mod drop;
 pub mod entity;
 pub mod event;

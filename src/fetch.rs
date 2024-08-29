@@ -197,7 +197,7 @@ impl<Q: Query> FetcherState<Q> {
                 state_last: NonNull::new(end).unwrap_unchecked(),
                 index: NonNull::new(indices.as_ptr().cast_mut()).unwrap_unchecked(),
                 row: ArchetypeRow(0),
-                len: archetypes.get(indices[0]).unwrap_unchecked().entity_count(),
+                len: archetypes.get(indices[0]).unwrap_unchecked().len() as u32,
                 archetypes,
             }
         }
@@ -242,7 +242,7 @@ impl<Q: Query> FetcherState<Q> {
     /// Refreshes the query's archetype state for the given archetype.
     pub(crate) fn refresh_archetype(&mut self, arch: &Archetype) {
         debug_assert!(
-            arch.entity_count() != 0,
+            arch.len() != 0,
             "`refresh_archetype` called with empty archetype"
         );
 
@@ -735,7 +735,7 @@ impl<'a, Q: Query> Iterator for Iter<'a, Q> {
             let arch = unsafe { self.archetypes.get(idx).unwrap_unchecked() };
 
             self.row = ArchetypeRow(0);
-            self.len = arch.entity_count();
+            self.len = arch.len() as u32;
 
             // SAFETY: Fetcher state only contains nonempty archetypes.
             unsafe { assume_unchecked(self.len > 0) };
@@ -775,7 +775,7 @@ impl<Q: Query> ExactSizeIterator for Iter<'_, Q> {
         while index != index_last {
             index = unsafe { index.add(1) };
 
-            remaining += unsafe { self.archetypes.get(*index).unwrap_unchecked() }.entity_count();
+            remaining += unsafe { self.archetypes.get(*index).unwrap_unchecked() }.len() as u32;
         }
 
         // Return the total.
@@ -899,7 +899,7 @@ mod rayon_impl {
                 .zip_eq(self.arch_indices)
                 .flat_map(|(state, &index)| {
                     let entity_count =
-                        unsafe { self.archetypes.get(index).unwrap_unchecked() }.entity_count();
+                        unsafe { self.archetypes.get(index).unwrap_unchecked() }.len() as u32;
 
                     (0..entity_count).into_par_iter().map(|row| {
                         let item: Q::This<'a> = unsafe { Q::get(state, ArchetypeRow(row)) };
