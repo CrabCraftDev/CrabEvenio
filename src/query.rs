@@ -1,5 +1,6 @@
 //! Type-level DSL for retrieving data from entities.
 
+use core::any::TypeId;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -80,6 +81,10 @@ pub unsafe trait Query {
     /// Returns a new [`Self::State`] instance.
     fn new_state(world: &mut World) -> Self::State;
 
+    /// Attempts to construct a new [`Self::State`] instance without mutable
+    /// access to the world.
+    fn get_new_state(world: &World) -> Option<Self::State>;
+
     /// Returns a new [`Self::ArchState`] instance.
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState>;
 
@@ -130,6 +135,10 @@ unsafe impl<C: Component> Query for &'_ C {
         world.add_component::<C>().index()
     }
 
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        world.components().get_by_type_id(TypeId::of::<C>()).map(|info| info.id().index())
+    }
+
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
         arch.column_of(*state).map(|c| ColumnPtr(c.data().cast()))
     }
@@ -161,6 +170,10 @@ unsafe impl<C: Component<Mutability = Mutable>> Query for &'_ mut C {
 
     fn new_state(world: &mut World) -> Self::State {
         world.add_component::<C>().index()
+    }
+
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        world.components().get_by_type_id(TypeId::of::<C>()).map(|info| info.id().index())
     }
 
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
@@ -205,6 +218,14 @@ macro_rules! impl_query_tuple {
                 )
             }
 
+            fn get_new_state(world: &World) -> Option<Self::State> {
+                Some((
+                    $(
+                        $Q::get_new_state(world)?,
+                    )*
+                ))
+            }
+
             fn new_arch_state(arch: &Archetype, ($($q,)*): &mut Self::State) -> Option<Self::ArchState> {
                 Some((
                     $(
@@ -247,6 +268,10 @@ unsafe impl<Q: Query> Query for Option<Q> {
 
     fn new_state(world: &mut World) -> Self::State {
         Q::new_state(world)
+    }
+
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        Q::get_new_state(world)
     }
 
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
@@ -329,6 +354,10 @@ where
 
     fn new_state(world: &mut World) -> Self::State {
         (L::new_state(world), R::new_state(world))
+    }
+
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        Some((L::get_new_state(world)?, R::get_new_state(world)?))
     }
 
     fn new_arch_state(
@@ -425,6 +454,10 @@ where
         (L::new_state(world), R::new_state(world))
     }
 
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        Some((L::get_new_state(world)?, R::get_new_state(world)?))
+    }
+
     fn new_arch_state(
         arch: &Archetype,
         (left_state, right_state): &mut Self::State,
@@ -507,6 +540,10 @@ unsafe impl<Q: Query> Query for Not<Q> {
         Q::new_state(world)
     }
 
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        Q::get_new_state(world)
+    }
+
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
         match Q::new_arch_state(arch, state) {
             Some(_) => None,
@@ -577,6 +614,10 @@ unsafe impl<Q: Query> Query for With<Q> {
 
     fn new_state(world: &mut World) -> Self::State {
         Q::new_state(world)
+    }
+
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        Q::get_new_state(world)
     }
 
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
@@ -697,6 +738,10 @@ unsafe impl<Q: Query> Query for Has<Q> {
         Q::new_state(world)
     }
 
+    fn get_new_state(world: &World) -> Option<Self::State> {
+        Q::get_new_state(world)
+    }
+
     fn new_arch_state(arch: &Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
         Some(Q::new_arch_state(arch, state).is_some())
     }
@@ -724,6 +769,10 @@ unsafe impl Query for EntityId {
     }
 
     fn new_state(_world: &mut World) -> Self::State {}
+
+    fn get_new_state(_world: &World) -> Option<Self::State> {
+        Some(())
+    }
 
     fn new_arch_state(arch: &Archetype, (): &mut Self::State) -> Option<Self::ArchState> {
         Some(unsafe {
@@ -754,6 +803,10 @@ unsafe impl<T: ?Sized> Query for PhantomData<T> {
     }
 
     fn new_state(_world: &mut World) -> Self::State {}
+
+    fn get_new_state(_world: &World) -> Option<Self::State> {
+        Some(())
+    }
 
     fn new_arch_state(_arch: &Archetype, _state: &mut Self::State) -> Option<Self::ArchState> {
         Some(())
@@ -894,7 +947,7 @@ mod tests {
 
                 world.send(E);
 
-                let matching = &world.get::<Matching>(matching_entity).unwrap().0;
+                let matching = &world.get::<&Matching>(matching_entity).unwrap().0;
 
                 if !matching.is_empty() {
                     panic!("entities not matched: {matching:?}");

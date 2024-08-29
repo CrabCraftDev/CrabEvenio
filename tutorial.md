@@ -391,7 +391,7 @@ world.send(InitMonster {
     pos: [24.0, 24.0],
 });
 
-assert!(world.get::<Monster>(entity).is_some());
+assert!(world.get::<&Monster>(entity).is_some());
 ```
 
 Whenever we insert a component on an entity, what we're actually doing is sending the special [`Insert`] event for that component.
@@ -416,16 +416,16 @@ let e = world.spawn();
 world.insert(e, A);
 
 // Component exists.
-assert!(world.get::<A>(e).is_some());
+assert!(world.get::<&A>(e).is_some());
 
 world.remove::<A>(e);
 
 // No more component.
-assert!(world.get::<A>(e).is_none());
+assert!(world.get::<&A>(e).is_none());
 
 // Sending the `Remove` event again has no effect.
 world.remove::<A>(e);
-assert!(world.get::<A>(e).is_none());
+assert!(world.get::<&A>(e).is_none());
 
 world.despawn(e);
 
@@ -670,7 +670,7 @@ world.insert(e, Stamina(100));
 
 world.send_to(e, MyTargetedEvent { data: 10 });
 
-assert_eq!(world.get::<Health>(e).unwrap().0, 30);
+assert_eq!(world.get::<&Health>(e).unwrap().0, 30);
 ```
 
 The special [`Insert`], [`Remove`], and [`Despawn`] events are targeted.

@@ -132,6 +132,10 @@ pub(crate) fn derive_query(input: TokenStream) -> Result<TokenStream> {
                 <#tuple_ty as ::evenio::query::Query>::new_state(world)
             }
 
+            fn get_new_state(world: &::evenio::world::World) -> Option<Self::State> {
+                <#tuple_ty as ::evenio::query::Query>::get_new_state(world)
+            }
+
             fn new_arch_state(arch: &::evenio::archetype::Archetype, state: &mut Self::State) -> Option<Self::ArchState> {
                 <#tuple_ty as ::evenio::query::Query>::new_arch_state(arch, state)
             }

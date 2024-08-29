@@ -503,7 +503,7 @@ mod tests {
             b.0.push("hello".into());
         });
         world.send(E);
-        assert_eq!(world.get::<B>(e2), Some(&B(vec!["hello".into()])));
+        assert_eq!(world.get::<&B>(e2), Some(&B(vec!["hello".into()])));
 
         assert!(world.remove_component::<B>().is_some());
         assert!(!world.handlers().contains(s2));

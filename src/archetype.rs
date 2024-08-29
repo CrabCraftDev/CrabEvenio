@@ -1258,11 +1258,11 @@ mod tests {
 
         world.insert(e, C("hello".into()));
 
-        assert_eq!(world.get::<C>(e).unwrap().0, "hello");
+        assert_eq!(world.get::<&C>(e).unwrap().0, "hello");
 
         world.insert(e, C("goodbye".into()));
 
-        assert_eq!(world.get::<C>(e).unwrap().0, "goodbye");
+        assert_eq!(world.get::<&C>(e).unwrap().0, "goodbye");
     }
 
     #[test]
@@ -1340,8 +1340,8 @@ mod tests {
         let e = world.spawn();
 
         world.insert(e, (A, B, C));
-        world.get::<A>(e).unwrap();
-        world.get::<B>(e).unwrap();
-        world.get::<C>(e).unwrap();
+        world.get::<&A>(e).unwrap();
+        world.get::<&B>(e).unwrap();
+        world.get::<&C>(e).unwrap();
     }
 }

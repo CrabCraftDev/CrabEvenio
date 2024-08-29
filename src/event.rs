@@ -1312,7 +1312,7 @@ mod tests {
         world.send(A);
 
         assert_eq!(
-            world.get::<Result>(res).unwrap().0.as_slice(),
+            world.get::<&Result>(res).unwrap().0.as_slice(),
             &[0, 1, 2, 3, 4, 5]
         );
     }

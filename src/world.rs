@@ -23,16 +23,16 @@ use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{Entities, EntityId, EntityLocation, ReservedEntities};
 use crate::event::{
     AddGlobalEvent, AddTargetedEvent, Despawn, EventDescriptor, EventKind, EventMeta, EventPtr,
-    EventQueueItem, GlobalEvent, GlobalEventId, GlobalEventIdx, GlobalEventInfo,
-    GlobalEvents, Insert, InsertKindInfo, Remove, RemoveGlobalEvent, RemoveKindInfo,
-    RemoveTargetedEvent, Spawn, TargetedEvent, TargetedEventId, TargetedEventIdx,
-    TargetedEventInfo, TargetedEvents,
+    EventQueueItem, GlobalEvent, GlobalEventId, GlobalEventIdx, GlobalEventInfo, GlobalEvents,
+    Insert, InsertKindInfo, Remove, RemoveGlobalEvent, RemoveKindInfo, RemoveTargetedEvent, Spawn,
+    TargetedEvent, TargetedEventId, TargetedEventIdx, TargetedEventInfo, TargetedEvents,
 };
 use crate::handler::{
     AddHandler, Handler, HandlerConfig, HandlerId, HandlerInfo, HandlerInfoInner, HandlerList,
     Handlers, IntoHandler, MaybeInvalidAccess, ReceivedEventId, RemoveHandler,
 };
-use crate::mutability::{Mutability, Mutable};
+use crate::mutability::Mutability;
+use crate::query::{Query, ReadOnlyQuery};
 
 /// A container for all data in the ECS. This includes entities, components,
 /// handlers, and events.
@@ -242,8 +242,8 @@ impl World {
         self.send_to(entity, Despawn)
     }
 
-    /// Gets an immutable reference to component `C` on `entity`. Returns `None`
-    /// if `entity` doesn't exist or doesn't have the requested component.
+    /// Queries an entity with a read-only query. Returns `None` if the entity
+    /// doesn't exist or doesn't match the query.
     ///
     /// # Examples
     ///
@@ -258,33 +258,20 @@ impl World {
     /// let e = world.spawn();
     /// world.insert(e, MyComponent(123));
     ///
-    /// assert_eq!(world.get::<MyComponent>(e), Some(&MyComponent(123)));
+    /// assert_eq!(world.get::<&MyComponent>(e), Some(&MyComponent(123)));
     /// ```
-    pub fn get<C: Component>(&self, entity: EntityId) -> Option<&C> {
+    pub fn get<Q: ReadOnlyQuery>(&self, entity: EntityId) -> Option<Q::This<'_>> {
         let loc = self.entities.get(entity)?;
-
-        let component_idx = self
-            .components()
-            .get_by_type_id(TypeId::of::<C>())?
-            .id()
-            .index();
 
         let arch = unsafe { self.archetypes().get(loc.archetype).unwrap_unchecked() };
 
-        let col = arch.column_of(component_idx)?;
-
-        Some(unsafe {
-            &*col
-                .data()
-                .as_ptr()
-                .cast_const()
-                .cast::<C>()
-                .add(loc.row.0 as usize)
-        })
+        let mut query_state = Q::get_new_state(self)?;
+        let arch_state = Q::new_arch_state(arch, &mut query_state)?;
+        unsafe { Some(Q::get(&arch_state, loc.row)) }
     }
 
-    /// Gets a mutable reference to component `C` on `entity`. Returns `None` if
-    /// `entity` doesn't exist or doesn't have the requested component.
+    /// Queries an entity. Returns `None` if the entity doesn't exist or doesn't
+    /// match the query.
     ///
     /// # Examples
     ///
@@ -299,25 +286,16 @@ impl World {
     /// let e = world.spawn();
     /// world.insert(e, MyComponent(123));
     ///
-    /// assert_eq!(world.get_mut::<MyComponent>(e), Some(&mut MyComponent(123)));
+    /// assert_eq!(world.get_mut::<&mut MyComponent>(e), Some(&mut MyComponent(123)));
     /// ```
-    pub fn get_mut<C: Component<Mutability = Mutable>>(
-        &mut self,
-        entity: EntityId,
-    ) -> Option<&mut C> {
+    pub fn get_mut<Q: Query>(&self, entity: EntityId) -> Option<Q::This<'_>> {
         let loc = self.entities.get(entity)?;
-
-        let component_idx = self
-            .components()
-            .get_by_type_id(TypeId::of::<C>())?
-            .id()
-            .index();
 
         let arch = unsafe { self.archetypes().get(loc.archetype).unwrap_unchecked() };
 
-        let col = arch.column_of(component_idx)?;
-
-        Some(unsafe { &mut *col.data().as_ptr().cast::<C>().add(loc.row.0 as usize) })
+        let mut query_state = Q::get_new_state(self)?;
+        let arch_state = Q::new_arch_state(arch, &mut query_state)?;
+        unsafe { Some(Q::get(&arch_state, loc.row)) }
     }
 
     /// Adds a new handler to the world, returns its [`HandlerId`], and sends
@@ -560,7 +538,10 @@ impl World {
     /// let mut world = World::new();
     /// let ids = world.add_components::<(MyComponent, MyOtherComponent)>();
     ///
-    /// assert_eq!(ids, world.add_components::<(MyComponent, MyOtherComponent)>());
+    /// assert_eq!(
+    ///     ids,
+    ///     world.add_components::<(MyComponent, MyOtherComponent)>()
+    /// );
     /// ```
     pub fn add_components<C: ComponentSet>(&mut self) -> Vec<ComponentId> {
         // TODO: Use an ArrayVec here and in other places where we call
@@ -739,7 +720,7 @@ impl World {
     /// Removes all components of the set `C` from the world, and returns their
     /// [`ComponentInfo`]s. If a component in the set does not exist, the
     /// returned collection will not contain a [`ComponentInfo`] for it.
-    /// 
+    ///
     /// See [`remove_component`] for the effects of this function for each
     /// component in the set.
     ///
@@ -750,7 +731,7 @@ impl World {
     ///
     /// ```
     /// use evenio::prelude::*;
-    /// 
+    ///
     /// #[derive(GlobalEvent)]
     /// struct MyEvent;
     ///
@@ -762,12 +743,14 @@ impl World {
     ///
     /// let mut world = World::new();
     /// let [my_component, my_other_component] =
-    ///     world.add_components::<(MyComponent, MyOtherComponent)>()[..] else {
+    ///     world.add_components::<(MyComponent, MyOtherComponent)>()[..]
+    /// else {
     ///     unreachable!("add_components returns one ID for each added component");
     /// };
-    /// 
+    ///
     /// let my_handler = world.add_handler(|_: Receiver<MyEvent>, _: Fetcher<&MyComponent>| {});
-    /// let my_other_handler = world.add_handler(|_: Receiver<MyEvent>, _: Fetcher<&MyOtherComponent>| {});
+    /// let my_other_handler =
+    ///     world.add_handler(|_: Receiver<MyEvent>, _: Fetcher<&MyOtherComponent>| {});
     ///
     /// assert!(world.components().contains(my_component));
     /// assert!(world.components().contains(my_other_component));
@@ -783,7 +766,7 @@ impl World {
     /// assert!(!world.handlers().contains(my_handler));
     /// assert!(!world.handlers().contains(my_other_handler));
     /// ```
-    /// 
+    ///
     /// [`remove_component`]: World::remove_component
     pub fn remove_components<C: ComponentSet>(&mut self) -> Vec<ComponentInfo> {
         let mut infos = Vec::with_capacity(C::LEN);
