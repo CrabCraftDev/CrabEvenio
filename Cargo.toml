@@ -76,7 +76,8 @@ repository = "https://github.com/rj00a/evenio"
 rust-version = "1.78.0"
 
 [workspace.lints.rust]
-elided_lifetimes_in_paths = "allow"    # Warned by `future_incompatible`.
+# Warned by `future_incompatible`.
+elided_lifetimes_in_paths = { level = "allow", priority = 1 }
 future_incompatible = "warn"
 missing_debug_implementations = "warn"
 missing_docs = "warn"
