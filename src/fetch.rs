@@ -249,7 +249,7 @@ impl<Q: Query> FetcherState<Q> {
             "`refresh_archetype` called with empty archetype"
         );
 
-        if let Some(fetch) = Q::new_arch_state(arch, &mut self.state) {
+        if let Some(fetch) = Q::new_arch_state(arch, &self.state) {
             self.map.insert(arch.index(), fetch);
         }
     }

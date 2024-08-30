@@ -1,6 +1,6 @@
-use alloc::alloc::{dealloc, handle_alloc_error, realloc, Layout};
+use alloc::alloc::{alloc, realloc, dealloc, handle_alloc_error};
+use core::alloc::Layout;
 use core::ptr::{copy_nonoverlapping, NonNull};
-
 use crate::data_type::DataType;
 #[derive(Debug)]
 pub(crate) struct DataStore {
@@ -89,7 +89,7 @@ impl DataStore {
 
         let ptr = if old_capacity == 0 {
             // SAFETY: We checked size > 0 above.
-            std::alloc::alloc(new_capacity_layout)
+            alloc(new_capacity_layout)
         } else {
             // SAFETY: Previous layout must have been valid; caller guarantees
             // that `old_capacity` is the actual current size of the allocation.

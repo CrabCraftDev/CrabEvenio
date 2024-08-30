@@ -336,7 +336,7 @@ impl World {
         if !conflicts.is_empty() {
             let mut message = "called World::get_mut with a query that has conflicting component \
                                access (aliased mutability)\n"
-                .to_string();
+                .to_owned();
 
             self.conflicts_error_message(&mut message, conflicts);
 
@@ -943,9 +943,7 @@ impl World {
             match kind {
                 EventKind::Normal => {}
                 EventKind::Insert(InsertedComponentsInfo {
-                    component_indices,
-                    permutation: _,
-                    get_components: _,
+                    component_indices, ..
                 }) => {
                     for component_idx in component_indices {
                         if let Some(info) = self.components.get_by_index_mut(component_idx) {
@@ -961,13 +959,11 @@ impl World {
                     }
                 }
                 EventKind::Spawn(SpawnInfo {
-                    components_field_offset: _,
                     inserted_components:
                         InsertedComponentsInfo {
-                            component_indices,
-                            permutation: _,
-                            get_components: _,
+                            component_indices, ..
                         },
+                    ..
                 }) => {
                     for component_idx in component_indices {
                         if let Some(info) = self.components.get_by_index_mut(component_idx) {
@@ -1092,9 +1088,7 @@ impl World {
         match info.kind() {
             EventKind::Normal => {}
             EventKind::Insert(InsertedComponentsInfo {
-                component_indices,
-                permutation: _,
-                get_components: _,
+                component_indices, ..
             }) => {
                 for component_idx in component_indices {
                     if let Some(info) = self.components.get_by_index_mut(component_idx) {
@@ -1110,13 +1104,11 @@ impl World {
                 }
             }
             EventKind::Spawn(SpawnInfo {
-                components_field_offset: _,
                 inserted_components:
                     InsertedComponentsInfo {
-                        component_indices,
-                        permutation: _,
-                        get_components: _,
+                        component_indices, ..
                     },
+                ..
             }) => {
                 for component_idx in component_indices {
                     if let Some(info) = self.components.get_by_index_mut(component_idx) {
@@ -1354,7 +1346,7 @@ impl World {
                     let components_ptr: *const u8 = ctx.event.as_ptr();
 
                     // Resize the component pointer buffer.
-                    let mut buffer = &mut ctx.world.component_pointer_buffer;
+                    let buffer = &mut ctx.world.component_pointer_buffer;
                     buffer.reserve(permutation.len().saturating_sub(buffer.len()));
                     // SAFETY: We just ensured that the buffer's capacity is
                     // sufficient. Elements being uninitialized is not an issue,
@@ -1365,7 +1357,7 @@ impl World {
 
                     // Create a `ComponentPointerConsumer` with the event's
                     // permutation to sort the collected component pointers.
-                    let mut consumer = ComponentPointerConsumer::new(&permutation, &mut buffer);
+                    let mut consumer = ComponentPointerConsumer::new(permutation, buffer);
 
                     // Collect the component pointers.
                     unsafe { get_components(components_ptr, &mut consumer) };
@@ -1380,7 +1372,7 @@ impl World {
                             target_location,
                             dst,
                             component_indices,
-                            &component_pointers,
+                            component_pointers,
                             &mut ctx.world.entities,
                         )
                     };
@@ -1426,7 +1418,7 @@ impl World {
                     let arch = ctx
                         .world
                         .archetypes
-                        .get_by_components(&component_indices)
+                        .get_by_components(component_indices)
                         .unwrap_or_else(|| unsafe {
                             ctx.world.archetypes.create_archetype(
                                 component_indices.clone(),
@@ -1441,7 +1433,7 @@ impl World {
                         unsafe { ctx.event.as_ptr().byte_add(*components_field_offset) };
 
                     // Resize the component pointer buffer.
-                    let mut buffer = &mut ctx.world.component_pointer_buffer;
+                    let buffer = &mut ctx.world.component_pointer_buffer;
                     buffer.reserve(permutation.len().saturating_sub(buffer.len()));
                     // SAFETY: We just ensured that the buffer's capacity is
                     // sufficient. Elements being uninitialized is not an issue,
@@ -1452,7 +1444,7 @@ impl World {
 
                     // Create a `ComponentPointerConsumer` with the event's
                     // permutation to sort the collected component pointers.
-                    let mut consumer = ComponentPointerConsumer::new(&permutation, &mut buffer);
+                    let mut consumer = ComponentPointerConsumer::new(permutation, buffer);
 
                     // Collect the component pointers.
                     unsafe { get_components(components_ptr, &mut consumer) };
@@ -1464,7 +1456,7 @@ impl World {
                     ctx.world
                         .reserved_entities
                         .spawn_one(&mut ctx.world.entities, |id| unsafe {
-                            ctx.world.archetypes.spawn(id, arch, &component_pointers)
+                            ctx.world.archetypes.spawn(id, arch, component_pointers)
                         });
 
                     // Inserted components are owned by the archetype now. We

@@ -1,6 +1,7 @@
-use alloc::alloc::{alloc, handle_alloc_error, Layout};
+use alloc::alloc::{alloc, handle_alloc_error};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec};
+use core::alloc::Layout;
 use core::mem::{transmute, MaybeUninit};
 use core::ptr::{slice_from_raw_parts_mut, NonNull};
 

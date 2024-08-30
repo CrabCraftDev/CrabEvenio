@@ -1,9 +1,8 @@
 #![expect(unused, reason = "will be used in more places down the line")]
 
-use std::alloc::Layout;
-use std::any::{type_name, TypeId};
-use std::ptr::NonNull;
-use std::intrinsics::transmute;
+use core::alloc::Layout;
+use core::any::{type_name, TypeId};
+use core::ptr::NonNull;
 use crate::drop::{drop_fn_of, DropFn};
 
 /// A type whose properties are stored and processed dynamically at runtime.
@@ -41,7 +40,7 @@ impl DataType {
         // TODO: Use `Layout::dangling` once it's stabilized.
         // SAFETY: The alignment is guaranteed to be non-zero, so the pointer
         // cannot be null.
-        unsafe { NonNull::new_unchecked(transmute(self.layout.align())) }
+        unsafe { NonNull::new_unchecked(self.layout.align() as *mut u8) }
     }
     
     pub(crate) fn layout_and_drop_fn_equal(a: DataType, b: DataType) -> bool {

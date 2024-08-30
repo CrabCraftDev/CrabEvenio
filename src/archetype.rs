@@ -399,6 +399,7 @@ impl Archetypes {
                 }
             }
 
+            #[allow(clippy::struct_field_names)]
             pub(super) struct Process<I: Iterator<Item = ComponentIdx>> {
                 src_component_indices: Adapter<I>,
                 dst_component_indices: Adapter<I>,
@@ -1024,7 +1025,7 @@ impl Archetype {
 
 impl Drop for Archetype {
     fn drop(&mut self) {
-        let mut columns = unsafe {
+        let columns = unsafe {
             Box::from_raw(slice::from_raw_parts_mut(
                 self.columns.as_ptr(),
                 self.component_indices.len(),
@@ -1034,7 +1035,7 @@ impl Drop for Archetype {
         let len = self.entity_ids.len();
         let cap = self.entity_ids.capacity();
 
-        for col in columns.iter_mut() {
+        for col in columns {
             // Drop components.
             for i in 0..len {
                 unsafe { col.drop(i) };

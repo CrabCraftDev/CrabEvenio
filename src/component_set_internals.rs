@@ -60,6 +60,14 @@ impl<'p> ComponentPointerConsumer<'p> {
 /// This trait houses the inner workings of [`ComponentSet`]s. It is marked
 /// public, but only actually accessible from within the crate, as it is placed
 /// in a `pub(crate)` module.
+/// 
+/// # Safety
+/// 
+/// Implementations must uphold the safety contract of [`add_components`] and
+/// [`get_components`].
+/// 
+/// [`add_components`]: Self::add_components
+/// [`get_components`]: Self::get_components
 // NOTE: This trait was separated from `ComponentSet` in order to hide
 // implementation details such as `ComponentPointerConsumer` or the
 // `add_components` function from consumers of this library.
@@ -75,6 +83,8 @@ pub unsafe trait ComponentSetInternal {
     /// [`Self::LEN`] times and (2) the order of the calls exactly matches the
     /// order in which [`get_components`] adds component pointers to the
     /// [`ComponentPointerConsumer`] it is passed.
+    ///
+    /// [`get_components`]: Self::get_components
     // NOTE: Returning an iterator would be more idiomatic, but causes the
     // borrow checker to complain in the tuple implementations because of
     // multiple mutable borrows of the world existing at the same time. I
@@ -95,6 +105,8 @@ pub unsafe trait ComponentSetInternal {
     /// the collection it is passed and (3) each pointer added to the consumer
     /// must point to a component that is valid for the corresponding component
     /// index produced by `add_components`.
+    ///
+    /// [`add_components`]: Self::add_components
     fn get_components(&self, out: &mut ComponentPointerConsumer);
 }
 
