@@ -1371,9 +1371,9 @@ impl World {
                         )
                     };
 
-                    // Inserted component is owned by the archetype now. We wait to unpack
-                    // in case one of the above functions panics.
-                    ctx.unpack();
+                    // Inserted components are owned by the archetype now. We
+                    // wait to unpack in case one of the above functions panics.
+                    let _ = ctx.unpack();
                 }
                 EventKind::Remove(RemovedComponentsInfo { component_indices }) => {
                     // `Remove` doesn't need drop.
@@ -1401,22 +1401,50 @@ impl World {
                     };
                 }
                 EventKind::Spawn(SpawnInfo {
-                    components_field_offset: _,
+                    components_field_offset,
                     inserted_components:
                         InsertedComponentsInfo {
                             component_indices,
-                            permutation: _,
-                            get_components: _,
+                            permutation,
+                            get_components,
                         },
                 }) => {
-                    // TODO: Spawn with components.
-                    
-                    // `Spawn` doesn't need drop.
-                    let _ = ctx.unpack();
+                    let arch = unsafe {
+                        ctx.world.archetypes.create_archetype(
+                            // TODO: This clone can be avoided if we first check
+                            //  if the archetype already exists, which doesn't
+                            //  require an owned BitSet.
+                            component_indices.clone(),
+                            &mut ctx.world.components,
+                            &mut ctx.world.handlers,
+                        )
+                    };
 
-                    // Spawn all entities from the reserved entity queue.
-                    self.reserved_entities
-                        .spawn_all(&mut self.entities, |id| self.archetypes.spawn(id));
+                    // The offset of the `components` field of the event is
+                    // stored in the event kind.
+                    let components_ptr: *const u8 =
+                        unsafe { ctx.event.as_ptr().byte_add(*components_field_offset) };
+
+                    // Create a `ComponentPointerConsumer` with the event's
+                    // permutation to sort the collected component pointers.
+                    let mut consumer = ComponentPointerConsumer::new(&permutation);
+
+                    // Collect the component pointers.
+                    unsafe { get_components(components_ptr, &mut consumer) };
+
+                    // Unpack the consumer to get the pointers.
+                    let component_pointers = unsafe { consumer.into_pointers_unchecked() };
+
+                    // Spawn the next entity from the reserved entity queue.
+                    ctx.world
+                        .reserved_entities
+                        .spawn_one(&mut ctx.world.entities, |id| unsafe {
+                            ctx.world.archetypes.spawn(id, arch, &component_pointers)
+                        });
+
+                    // Inserted components are owned by the archetype now. We
+                    // wait to unpack in case one of the above functions panics.
+                    let _ = ctx.unpack();
                 }
                 EventKind::Despawn => {
                     // `Despawn` doesn't need drop.

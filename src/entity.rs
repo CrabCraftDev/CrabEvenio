@@ -216,9 +216,6 @@ impl ReservedEntities {
     pub(crate) fn reserve(&mut self, entities: &Entities) -> EntityId {
         if let Some(k) = self.iter.next(&entities.locs) {
             self.count += 1;
-            if self.count > 1 {
-                panic!("TOO MANY ENTITIIEEEES")
-            }
             EntityId(k)
         } else {
             panic!("too many entities")
@@ -238,6 +235,20 @@ impl ReservedEntities {
 
         self.iter = entities.locs.next_key_iter();
         self.count = 0;
+    }
+
+    /// Spawns a single reserved entity using the provided function that
+    /// constructs its location using its id.
+    pub(crate) fn spawn_one(
+        &mut self,
+        entities: &mut Entities,
+        mut f: impl FnMut(EntityId) -> EntityLocation,
+    ) {
+        assert!(self.count >= 1);
+        entities.add_with(&mut f);
+
+        self.iter = entities.locs.next_key_iter();
+        self.count -= 1;
     }
 
     /// Refreshes the internal state of the queue after a change to the world's

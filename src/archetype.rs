@@ -88,42 +88,62 @@ impl Archetypes {
         self.archetypes.get(idx.0 as usize)
     }
 
+    /// Gets a mutable reference to the archetype identified by the given
+    /// [`ArchetypeIdx`]. Returns `None` if the index is invalid.
+    fn get_mut(&mut self, idx: ArchetypeIdx) -> Option<&mut Archetype> {
+        self.archetypes.get_mut(idx.0 as usize)
+    }
+
     /// Gets a reference to the archetype with the given set of components.
     ///
     /// Returns `None` if there is no archetype with the given set of
     /// components.
-    pub(crate) fn get_by_components(&self, components: &BitSet<ComponentIdx>) -> Option<&Archetype> {
+    pub(crate) fn get_by_components(
+        &self,
+        components: &BitSet<ComponentIdx>,
+    ) -> Option<&Archetype> {
         let idx = *self.by_components.get(components)?;
         Some(unsafe { self.get(idx).unwrap_unchecked() })
     }
 
-    /// Spawns a new entity into the empty archetype with the given ID and
-    /// returns its location.
-    pub(crate) fn spawn(&mut self, id: EntityId) -> EntityLocation {
-        let empty = self.empty_mut();
+    /// Spawns a new entity with the given ID and returns its location.
+    /// 
+    /// # Safety
+    /// 
+    /// The elements of `component_pointers` must exactly correspond to the
+    /// columns of `archetype`, in order.
+    pub(crate) unsafe fn spawn(
+        &mut self,
+        id: EntityId,
+        archetype: ArchetypeIdx,
+        component_pointers: &[*const u8],
+    ) -> EntityLocation {
+        let arch = self.get_mut(archetype).unwrap();
 
         // Reserve space for the spawned entity.
-        let reallocated = unsafe { empty.reserve_one() };
+        let reallocated = unsafe { arch.reserve_one() };
 
-        // Add the entity to the empty archetype. This does not involve adding
-        // components, as the empty archetype does not have columns. Only the
-        // spawned entity's id needs to be stored.
-        let row = ArchetypeRow(empty.len() as u32);
-        empty.entity_ids.push(id);
+        // Add the entity to the archetype.
+        let row_index = arch.len();
+        let row = ArchetypeRow(row_index as u32);
+        arch.entity_ids.push(id);
+        
+        // Insert the components.
+        for (index, &pointer) in component_pointers.iter().enumerate() {
+            let col = &*arch.get_ptr(index);
+            col.insert(row_index, pointer);
+        }
 
         // If the archetype was empty or has been reallocated, notify the
         // listening handlers of this change.
-        if empty.len() == 1 || reallocated {
-            for mut ptr in empty.refresh_listeners.iter().copied() {
-                unsafe { ptr.as_info_mut().handler_mut().refresh_archetype(empty) };
+        if arch.len() == 1 || reallocated {
+            for mut ptr in arch.refresh_listeners.iter().copied() {
+                unsafe { ptr.as_info_mut().handler_mut().refresh_archetype(arch) };
             }
         }
 
         // Construct the entity's location.
-        EntityLocation {
-            archetype: ArchetypeIdx::EMPTY,
-            row,
-        }
+        EntityLocation { archetype, row }
     }
 
     /// Returns an iterator over all archetypes in an arbitrary order.
@@ -363,7 +383,7 @@ impl Archetypes {
             /// Wrapper around an iterator. Has to be advanced using the
             /// [`advance`] method, which will cache the iterator's next element
             /// in `self.current` and increment `self.counter`.
-            /// 
+            ///
             /// [`advance`]: Adapter::advance
             struct Adapter<I: Iterator> {
                 counter: usize,
@@ -942,7 +962,7 @@ impl Archetype {
         if !self.component_indices().contains(idx) {
             return None;
         }
-        
+
         let idx = self.component_indices().count_less(idx);
 
         // SAFETY: `binary_search` ensures `idx` is in bounds.
@@ -1060,6 +1080,7 @@ impl fmt::Debug for Archetype {
 #[cfg(test)]
 mod tests {
     use std::alloc::Layout;
+
     use crate::bit_set::BitSet;
     use crate::component::ComponentIdx;
     use crate::prelude::*;
@@ -1138,14 +1159,11 @@ mod tests {
         let a_id = world.add_component::<A>();
         let e = world.spawn(());
         world.insert(e, A);
-        
+
         let mut components = BitSet::<ComponentIdx>::new();
         components.insert(a_id.index());
 
-        assert!(world
-            .archetypes()
-            .get_by_components(&components)
-            .is_some());
+        assert!(world.archetypes().get_by_components(&components).is_some());
     }
 
     #[test]
@@ -1163,9 +1181,9 @@ mod tests {
         println!("{:?}", Layout::new::<C>());
 
         let mut world = World::new();
-        let e = world.spawn(());
+        let e = world.spawn((A, B));
 
-        world.insert(e, (A, B, C));
+        world.insert(e, (B, C));
         world.get::<&A>(e).unwrap();
         world.get::<&B>(e).unwrap();
         world.get::<&C>(e).unwrap();
