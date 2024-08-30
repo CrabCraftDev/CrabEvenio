@@ -7,7 +7,8 @@ fn main() {
     divan::main()
 }
 
-const COUNTS: [u64; 10] = [1, 2, 3, 5, 10, 15, 20, 25, 30, 40];
+// const COUNTS: [u64; 10] = [1, 2, 3, 5, 10, 15, 20, 25, 30, 40];
+const COUNTS: [u64; 1] = [40];
 
 #[divan::bench(args = COUNTS, sample_size = 10)]
 fn spawn_many_comps_n_evenio(bencher: Bencher, count: u64) {
@@ -52,8 +53,8 @@ fn spawn_many_comps_n_evenio(bencher: Bencher, count: u64) {
 fn spawn_many_comps_40_evenio(bencher: Bencher) {
     use evenio::prelude::*;
 
-    macro_rules! add_components {
-        ($world:ident, $e:ident, $($($name:ident)*,)*) => {
+    macro_rules! spawn_with_components {
+        ($world:ident, $($($name:ident)*,)*) => {
             $($(
                 #[derive(Component, Default)]
                 struct $name(#[allow(dead_code)] u64);
@@ -65,24 +66,22 @@ fn spawn_many_comps_40_evenio(bencher: Bencher) {
                 )*
             );
 
-            $world.insert($e, black_box(set));
+            let e = $world.spawn(black_box(set));
+
+            $world.despawn(e);
         }
     }
 
     let mut world = World::new();
 
     bencher.bench_local(|| {
-        let e = world.spawn(());
-
-        add_components!(
-            world, e,
+        spawn_with_components!(
+            world,
             C0 C1 C2 C3 C4 C5 C6 C7 C8 C9,
             C10 C11 C12 C13 C14 C15 C16 C17 C18 C19,
             C20 C21 C22 C23 C24 C25 C26 C27 C28 C29,
             C30 C31 C32 C33 C34 C35 C36 C37 C38 C39,
         );
-
-        world.despawn(e);
 
         black_box(&mut world);
     });

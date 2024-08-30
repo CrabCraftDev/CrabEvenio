@@ -39,12 +39,19 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints]
 workspace = true
 
+[profile.bench]
+debug = true
+
 [[bench]]
 name = "btree_vs_hash"
 harness = false
 
 [[bench]]
 name = "add_components"
+harness = false
+
+[[bench]]
+name = "add_components_profiling"
 harness = false
 
 [[bench]]
