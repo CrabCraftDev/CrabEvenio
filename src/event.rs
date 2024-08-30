@@ -1010,6 +1010,10 @@ fn initialize_component_set<C: ComponentSet>(
     /// in the slice. If this condition is violated, the function will
     /// return a meaningless result, but not cause undefined behaviour.
     fn sorted_slice_contains_duplicates<T: PartialEq>(slice: &[T]) -> bool {
+        if slice.is_empty() {
+            return false;
+        }
+        
         // TODO: Use `slice.array_windows().any(|[a, b]| a == b)` once
         //  `[T]::array_windows` is stabilized.
         for i in 0..slice.len() - 1 {
