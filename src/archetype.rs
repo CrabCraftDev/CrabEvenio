@@ -8,6 +8,7 @@ use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr::NonNull;
 use core::{fmt, mem, slice};
+
 use ahash::RandomState;
 use slab::Slab;
 
@@ -331,7 +332,7 @@ impl Archetypes {
             use OldComponentState::*;
             use ProcessState::*;
 
-            use crate::component_indices::ComponentIndices;
+            use crate::component::ComponentIdx;
 
             /// Information and recommendations for action based on a comparison
             /// of the component indices of the current source and
@@ -374,37 +375,57 @@ impl Archetypes {
                 Done,
             }
 
-            pub(super) struct Process<'a> {
-                src_idx: usize,
-                dst_idx: usize,
-                new_idx: usize,
-                src_component_indices: &'a ComponentIndices,
-                dst_component_indices: &'a ComponentIndices,
-                new_component_indices: &'a ComponentIndices,
+            /// Wrapper around an iterator. Has to be advanced using the
+            /// [`advance`] method, which will cache the iterator's next element
+            /// in `self.current` and increment `self.counter`.
+            /// 
+            /// [`advance`]: Adapter::advance
+            struct Adapter<I: Iterator> {
+                counter: usize,
+                current: Option<I::Item>,
+                iter: I,
             }
 
-            impl<'a> Process<'a> {
+            impl<I: Iterator> Adapter<I> {
+                fn new(mut iter: I) -> Self {
+                    Self {
+                        counter: 0,
+                        current: iter.next(),
+                        iter,
+                    }
+                }
+
+                fn advance(&mut self) {
+                    self.counter += 1;
+                    self.current = self.iter.next();
+                }
+            }
+
+            pub(super) struct Process<I: Iterator<Item = ComponentIdx>> {
+                src_component_indices: Adapter<I>,
+                dst_component_indices: Adapter<I>,
+                new_component_indices: Adapter<I>,
+            }
+
+            impl<I: Iterator<Item = ComponentIdx>> Process<I> {
                 #[inline]
                 pub(super) fn new(
-                    src_component_indices: &'a ComponentIndices,
-                    dst_component_indices: &'a ComponentIndices,
-                    new_component_indices: &'a ComponentIndices,
+                    src_component_indices: I,
+                    dst_component_indices: I,
+                    new_component_indices: I,
                 ) -> Self {
                     Self {
-                        src_idx: 0,
-                        dst_idx: 0,
-                        new_idx: 0,
-                        src_component_indices,
-                        dst_component_indices,
-                        new_component_indices,
+                        src_component_indices: Adapter::new(src_component_indices),
+                        dst_component_indices: Adapter::new(dst_component_indices),
+                        new_component_indices: Adapter::new(new_component_indices),
                     }
                 }
 
                 #[inline]
                 pub(super) fn state(&self) -> ProcessState {
-                    let src_component_index = self.src_component_indices.get(self.src_idx).copied();
-                    let dst_component_index = self.dst_component_indices.get(self.dst_idx).copied();
-                    let new_component_index = self.new_component_indices.get(self.new_idx).copied();
+                    let src_component_index = self.src_component_indices.current;
+                    let dst_component_index = self.dst_component_indices.current;
+                    let new_component_index = self.new_component_indices.current;
 
                     match (
                         src_component_index,
@@ -460,7 +481,7 @@ impl Archetypes {
                 /// the destination column.
                 #[inline]
                 fn src_column_handled(&mut self) {
-                    self.src_idx += 1;
+                    self.src_component_indices.advance();
                 }
 
                 /// Should be called after a component has been added to the
@@ -468,14 +489,14 @@ impl Archetypes {
                 /// or the entity's component from the source column.
                 #[inline]
                 fn dst_column_handled(&mut self) {
-                    self.dst_idx += 1;
+                    self.dst_component_indices.advance();
                 }
 
                 /// Should be called after a new component has been added to the
                 /// destination column.
                 #[inline]
                 fn new_component_handled(&mut self) {
-                    self.new_idx += 1;
+                    self.new_component_indices.advance();
                 }
 
                 /// Should be called after the entity's component has been
@@ -513,17 +534,17 @@ impl Archetypes {
 
                 #[inline]
                 pub(super) fn src_idx(&self) -> usize {
-                    self.src_idx
+                    self.src_component_indices.counter
                 }
 
                 #[inline]
                 pub(super) fn dst_idx(&self) -> usize {
-                    self.dst_idx
+                    self.dst_component_indices.counter
                 }
 
                 #[inline]
                 pub(super) fn new_idx(&self) -> usize {
-                    self.new_idx
+                    self.new_component_indices.counter
                 }
             }
         }
@@ -532,12 +553,11 @@ impl Archetypes {
         use handle_components::OldComponentState::*;
         use handle_components::Process;
         use handle_components::ProcessState::*;
-        use crate::data_store::DataStore;
 
         let mut process = Process::new(
-            src_arch.component_indices(),
-            dst_arch.component_indices(),
-            new_component_indices,
+            src_arch.component_indices().iter().copied(),
+            dst_arch.component_indices().iter().copied(),
+            new_component_indices.iter().copied(),
         );
 
         loop {
@@ -843,7 +863,8 @@ impl Archetype {
             .collect();
 
         // SAFETY: `Box::into_raw` guarantees non-null.
-        let columns_ptr = unsafe { NonNull::new_unchecked(Box::into_raw(columns) as *mut DataStore) };
+        let columns_ptr =
+            unsafe { NonNull::new_unchecked(Box::into_raw(columns) as *mut DataStore) };
 
         Self {
             index: arch_idx,
@@ -1017,7 +1038,9 @@ impl Drop for Archetype {
             }
 
             // Free backing buffer.
-            unsafe { col.deallocate(cap); }
+            unsafe {
+                col.deallocate(cap);
+            }
         }
     }
 }
