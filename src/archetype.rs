@@ -106,9 +106,9 @@ impl Archetypes {
     }
 
     /// Spawns a new entity with the given ID and returns its location.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// The elements of `component_pointers` must exactly correspond to the
     /// columns of `archetype`, in order.
     pub(crate) unsafe fn spawn(
@@ -126,7 +126,7 @@ impl Archetypes {
         let row_index = arch.len();
         let row = ArchetypeRow(row_index as u32);
         arch.entity_ids.push(id);
-        
+
         // Insert the components.
         for (index, &pointer) in component_pointers.iter().enumerate() {
             let col = &*arch.get_ptr(index);

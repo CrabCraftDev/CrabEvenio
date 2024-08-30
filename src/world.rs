@@ -7,6 +7,7 @@ use core::any::{self, TypeId};
 use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem;
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
 use bumpalo::Bump;
@@ -48,6 +49,8 @@ pub struct World {
     global_events: GlobalEvents,
     targeted_events: TargetedEvents,
     event_queue: Vec<EventQueueItem>,
+    // Used in flush_event_queue to avoid frequent allocations.
+    component_pointer_buffer: Vec<MaybeUninit<*const u8>>,
     bump: Bump,
     /// So the world doesn't accidentally implement `Send` or `Sync`.
     _marker: PhantomData<*const ()>,
@@ -73,6 +76,7 @@ impl World {
             global_events: GlobalEvents::new(),
             targeted_events: TargetedEvents::new(),
             event_queue: vec![],
+            component_pointer_buffer: vec![],
             bump: Bump::new(),
             _marker: PhantomData,
         }
@@ -1349,15 +1353,23 @@ impl World {
                     // is the set of inserted components.
                     let components_ptr: *const u8 = ctx.event.as_ptr();
 
+                    // Resize the component pointer buffer.
+                    let mut buffer = &mut ctx.world.component_pointer_buffer;
+                    buffer.reserve(permutation.len().saturating_sub(buffer.len()));
+                    // SAFETY: We just ensured that the buffer's capacity is
+                    // sufficient. Elements being uninitialized is not an issue,
+                    // because they are MaybeUninit values anyway.
+                    unsafe { buffer.set_len(permutation.len()); }
+
                     // Create a `ComponentPointerConsumer` with the event's
                     // permutation to sort the collected component pointers.
-                    let mut consumer = ComponentPointerConsumer::new(&permutation);
+                    let mut consumer = ComponentPointerConsumer::new(&permutation, &mut buffer);
 
                     // Collect the component pointers.
                     unsafe { get_components(components_ptr, &mut consumer) };
 
                     // Unpack the consumer to get the pointers.
-                    let component_pointers = unsafe { consumer.into_pointers_unchecked() };
+                    let component_pointers = unsafe { consumer.get_pointers_unchecked() };
 
                     // Finally, move the entity to the destination archetype,
                     // passing the component pointers.
@@ -1422,15 +1434,23 @@ impl World {
                     let components_ptr: *const u8 =
                         unsafe { ctx.event.as_ptr().byte_add(*components_field_offset) };
 
+                    // Resize the component pointer buffer.
+                    let mut buffer = &mut ctx.world.component_pointer_buffer;
+                    buffer.reserve(permutation.len().saturating_sub(buffer.len()));
+                    // SAFETY: We just ensured that the buffer's capacity is
+                    // sufficient. Elements being uninitialized is not an issue,
+                    // because they are MaybeUninit values anyway.
+                    unsafe { buffer.set_len(permutation.len()); }
+
                     // Create a `ComponentPointerConsumer` with the event's
                     // permutation to sort the collected component pointers.
-                    let mut consumer = ComponentPointerConsumer::new(&permutation);
+                    let mut consumer = ComponentPointerConsumer::new(&permutation, &mut buffer);
 
                     // Collect the component pointers.
                     unsafe { get_components(components_ptr, &mut consumer) };
 
                     // Unpack the consumer to get the pointers.
-                    let component_pointers = unsafe { consumer.into_pointers_unchecked() };
+                    let component_pointers = unsafe { consumer.get_pointers_unchecked() };
 
                     // Spawn the next entity from the reserved entity queue.
                     ctx.world

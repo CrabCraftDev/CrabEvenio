@@ -4,7 +4,6 @@ use core::mem::MaybeUninit;
 
 use evenio_macros::all_tuples;
 
-use crate::boxed_slice;
 use crate::component::{Component, ComponentId, ComponentInfo, ComponentSet};
 use crate::permutation::Permutation;
 use crate::world::World;
@@ -16,14 +15,17 @@ use crate::world::World;
 #[derive(Debug)]
 pub struct ComponentPointerConsumer<'p> {
     permutation: &'p Permutation,
-    pointers: Box<[MaybeUninit<*const u8>]>,
+    pointers: &'p mut [MaybeUninit<*const u8>],
     position: usize,
 }
 
 impl<'p> ComponentPointerConsumer<'p> {
     /// Constructs a new component pointer consumer with the given permutation.
-    pub(crate) fn new(permutation: &'p Permutation) -> Self {
-        let pointers = boxed_slice::uninit(permutation.len());
+    pub(crate) fn new(
+        permutation: &'p Permutation,
+        pointers: &'p mut [MaybeUninit<*const u8>],
+    ) -> Self {
+        debug_assert_eq!(permutation.len(), pointers.len());
         Self {
             permutation,
             pointers,
@@ -34,23 +36,24 @@ impl<'p> ComponentPointerConsumer<'p> {
     /// Adds a pointer and advances the consumer's internal position. The
     /// pointer is inserted at the index that the consumer's permutation maps
     /// the current internal position to.
+    #[inline(always)]
     pub(crate) fn add_pointer(&mut self, pointer: *const u8) {
         let insertion_index = self.permutation.new_index_of(self.position);
         self.position += 1;
         self.pointers[insertion_index] = MaybeUninit::new(pointer);
     }
 
-    /// Unpacks the consumer and returns the collected pointers.
+    /// Returns the collected pointers.
     ///
     /// # Safety
     ///
     /// The caller must ensure that `add_pointer` has been called a number of
     /// times equal to the length of the permutation borrowed by the consumer,
-    /// as the contents of the returned boxed slice will not have been fully
+    /// as the contents of the returned slice will not have been fully
     /// initialized otherwise.
-    pub(crate) unsafe fn into_pointers_unchecked(self) -> Box<[*const u8]> {
+    pub(crate) unsafe fn get_pointers_unchecked(&self) -> &[*const u8] {
         debug_assert_eq!(self.position, self.permutation.len());
-        boxed_slice::assume_init(self.pointers)
+        &*(self.pointers as *const [MaybeUninit<*const u8>] as *const [*const u8])
     }
 }
 
