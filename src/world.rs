@@ -13,11 +13,11 @@ use bumpalo::Bump;
 
 use crate::access::ComponentAccess;
 use crate::archetype::Archetypes;
+use crate::bit_set::BitSet;
 use crate::component::{
     AddComponent, Component, ComponentDescriptor, ComponentId, ComponentIdx, ComponentInfo,
     ComponentSet, Components, RemoveComponent,
 };
-use crate::component_indices::ComponentIndices;
 use crate::component_set_internals::ComponentPointerConsumer;
 use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{Entities, EntityId, EntityLocation, ReservedEntities};
@@ -927,14 +927,14 @@ impl World {
                     permutation: _,
                     get_components: _,
                 }) => {
-                    for &component_idx in component_indices {
+                    for component_idx in component_indices {
                         if let Some(info) = self.components.get_by_index_mut(component_idx) {
                             info.insert_events.insert(id);
                         }
                     }
                 }
                 EventKind::Remove(RemoveKindInfo { component_indices }) => {
-                    for &component_idx in component_indices {
+                    for component_idx in component_indices {
                         if let Some(info) = self.components.get_by_index_mut(component_idx) {
                             info.remove_events.insert(id);
                         }
@@ -1062,14 +1062,14 @@ impl World {
                 permutation: _,
                 get_components: _,
             }) => {
-                for &component_idx in component_indices {
+                for component_idx in component_indices {
                     if let Some(info) = self.components.get_by_index_mut(component_idx) {
                         info.insert_events.remove(&event);
                     }
                 }
             }
             EventKind::Remove(RemoveKindInfo { component_indices }) => {
-                for &component_idx in component_indices {
+                for component_idx in component_indices {
                     if let Some(info) = self.components.get_by_index_mut(component_idx) {
                         info.remove_events.remove(&event);
                     }
@@ -1292,7 +1292,7 @@ impl World {
                         .get(target_location.archetype)
                         .unwrap();
                     let dst_component_indices =
-                        src_arch.component_indices().with_all(&component_indices);
+                        src_arch.component_indices().clone() | component_indices;
                     let dst = unsafe {
                         ctx.world.archetypes.create_archetype(
                             dst_component_indices,
@@ -1336,8 +1336,9 @@ impl World {
                     let _ = ctx.unpack();
 
                     let src_arch = self.archetypes().get(target_location.archetype).unwrap();
-                    let dst_component_indices =
-                        src_arch.component_indices().without_all(component_indices);
+                    let mut dst_component_indices =
+                        src_arch.component_indices().clone();
+                    dst_component_indices.remove_all(component_indices);
                     let dst = unsafe {
                         self.archetypes.create_archetype(
                             dst_component_indices,
@@ -1350,7 +1351,7 @@ impl World {
                         self.archetypes.move_entity(
                             target_location,
                             dst,
-                            &ComponentIndices::empty(),
+                            &BitSet::<ComponentIdx>::new(),
                             &[],
                             &mut self.entities,
                         )

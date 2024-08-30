@@ -7,10 +7,10 @@ use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::ops::{BitOr, BitOrAssign, BitXor, BitXorAssign};
 use core::{any, fmt};
-
 use crate::sparse::SparseIndex;
 
 /// A set data structure backed by a vector of bits.
+#[derive(Hash)]
 pub(crate) struct BitSet<T = usize> {
     blocks: Vec<Block>,
     _marker: PhantomData<T>,
@@ -140,6 +140,35 @@ impl<T: SparseIndex> BitSet<T> {
             .map_or(false, |&block| (block >> bit) & 1 == 1)
     }
 
+    /// Returns the number of elements less than `value`.
+    #[must_use]
+    pub(crate) fn count_less(&self, value: T) -> usize {
+        let idx = value.index();
+
+        let (block_index, bit_index) = div_rem(idx, BITS);
+
+        let before_block = self.blocks
+            .iter()
+            .copied()
+            .take(block_index)
+            .map(|block| block.count_ones())
+            .sum::<u32>();
+        let Some(block) = self.blocks.get(block_index) else {
+            return before_block as usize;
+        };
+        // all ones until bit_index
+        let mask = !(!0 >> bit_index);
+        let in_block = (block & mask).count_ones();
+        (before_block + in_block) as usize
+    }
+    
+    /// Removes all elements of `other` from `self`.
+    pub(crate) fn remove_all(&mut self, other: &Self) {
+        for (a, b) in self.blocks.iter_mut().zip(other.blocks.iter()) {
+            *a &= !*b;
+        }
+    }
+    
     /// Returns an iterator over the element in the set in ascending order.
     pub(crate) fn iter(&self) -> Iter<T> {
         Iter {

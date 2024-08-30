@@ -13,8 +13,8 @@ use ahash::RandomState;
 use slab::Slab;
 
 use crate::assume_unchecked;
+use crate::bit_set::BitSet;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
-use crate::component_indices::{ComponentIndices, ComponentIndicesPtr};
 use crate::data_store::DataStore;
 use crate::data_type::DataType;
 use crate::entity::{Entities, EntityId, EntityLocation};
@@ -22,7 +22,7 @@ use crate::event::{EventId, EventPtr, TargetedEventIdx};
 use crate::handler::{
     HandlerConfig, HandlerInfo, HandlerInfoPtr, HandlerList, HandlerParam, Handlers, InitError,
 };
-use crate::map::{Entry, HashMap};
+use crate::map::HashMap;
 use crate::prelude::World;
 use crate::sparse::SparseIndex;
 use crate::sparse_map::SparseMap;
@@ -46,7 +46,8 @@ use crate::world::UnsafeWorldCell;
 pub struct Archetypes {
     /// Always contains the empty archetype at index 0.
     archetypes: Slab<Archetype>,
-    by_components: HashMap<ComponentIndicesPtr, ArchetypeIdx>,
+    // TODO: Maybe reintroduce ComponentIndicesPtr or similar?
+    by_components: HashMap<BitSet<ComponentIdx>, ArchetypeIdx>,
 }
 
 impl Archetypes {
@@ -55,14 +56,10 @@ impl Archetypes {
     pub(crate) fn new() -> Self {
         let empty_arch = Archetype::empty();
 
-        // SAFETY: We only remove archetypes in `remove_component`, where we
-        // first remove the `by_components` entry (dropping the component
-        // indices pointer) and *then* drop the archetype that owns the
-        // component indices.
-        let component_indices_ptr = unsafe { empty_arch.component_indices.as_ptr() };
+        let component_indices = empty_arch.component_indices.clone();
 
         let mut by_components = HashMap::with_hasher(RandomState::new());
-        by_components.insert(component_indices_ptr, ArchetypeIdx::EMPTY);
+        by_components.insert(component_indices, ArchetypeIdx::EMPTY);
 
         Self {
             archetypes: Slab::from_iter([(0, empty_arch)]),
@@ -94,9 +91,8 @@ impl Archetypes {
     /// Gets a reference to the archetype with the given set of components.
     ///
     /// Returns `None` if there is no archetype with the given set of
-    /// components or the given [`ComponentIdx`] slice is not sorted and
-    /// deduplicated.
-    pub fn get_by_components(&self, components: &[ComponentIdx]) -> Option<&Archetype> {
+    /// components.
+    pub(crate) fn get_by_components(&self, components: &BitSet<ComponentIdx>) -> Option<&Archetype> {
         let idx = *self.by_components.get(components)?;
         Some(unsafe { self.get(idx).unwrap_unchecked() })
     }
@@ -189,7 +185,7 @@ impl Archetypes {
 
             // Remove the archetype from the `member_of` lists of its
             // components.
-            for &comp_idx in &**arch.component_indices() {
+            for comp_idx in arch.component_indices() {
                 if comp_idx != removed_component_id.index() {
                     let info = unsafe { components.get_by_index_mut(comp_idx).unwrap_unchecked() };
                     info.member_of.swap_remove(&arch_idx);
@@ -197,11 +193,7 @@ impl Archetypes {
             }
 
             // NOTE: Using plain `.remove()` here makes Miri sad.
-            // SAFETY: The component indices pointer created is a temporary
-            // value that is dropped before the archetype is dropped at the end
-            // of the loop body.
-            self.by_components
-                .remove_entry(&unsafe { arch.component_indices.as_ptr() });
+            self.by_components.remove_entry(&arch.component_indices);
 
             // Call the removed entity callback for each entity id in the
             // archetype.
@@ -221,27 +213,20 @@ impl Archetypes {
     /// exist).
     pub(crate) unsafe fn create_archetype(
         &mut self,
-        component_indices: ComponentIndices,
+        component_indices: BitSet<ComponentIdx>,
         components: &mut Components,
         handlers: &mut Handlers,
     ) -> ArchetypeIdx {
-        // SAFETY: We only remove archetypes in `remove_component`, where we
-        // first remove the `by_components` entry (dropping the component
-        // indices pointer) and *then* drop the archetype that owns the
-        // component indices.
-        let component_indices_ptr = component_indices.as_ptr();
-
         let archetypes_entry = self.archetypes.vacant_entry();
-        let by_components_entry = match self.by_components.entry(component_indices_ptr) {
-            Entry::Occupied(entry) => return *entry.get(),
-            Entry::Vacant(entry) => entry,
-        };
+        if let Some(&idx) = self.by_components.get(&component_indices) {
+            return idx;
+        }
 
         let arch_idx = ArchetypeIdx(archetypes_entry.key() as u32);
 
         // Construct the new archetype.
         // SAFETY: Caller guarantees component indices are valid.
-        let mut arch = Archetype::new(arch_idx, component_indices, components);
+        let mut arch = Archetype::new(arch_idx, component_indices.clone(), components);
 
         // Register all event handlers for the new archetype.
         for info in handlers.iter_mut() {
@@ -250,7 +235,7 @@ impl Archetypes {
 
         // Insert the archetype into the vacant entries and
         // our archetype list.
-        by_components_entry.insert(arch_idx);
+        self.by_components.insert(component_indices, arch_idx);
         archetypes_entry.insert(arch);
 
         arch_idx
@@ -284,7 +269,7 @@ impl Archetypes {
         &mut self,
         src: EntityLocation,
         dst: ArchetypeIdx,
-        new_component_indices: &ComponentIndices,
+        new_component_indices: &BitSet<ComponentIdx>,
         new_component_pointers: &[*const u8],
         entities: &mut Entities,
     ) -> ArchetypeRow {
@@ -296,7 +281,7 @@ impl Archetypes {
                 .get_mut(src.archetype.0 as usize)
                 .unwrap_unchecked();
 
-            for (&comp_idx, &comp_ptr) in new_component_indices.iter().zip(new_component_pointers) {
+            for (comp_idx, &comp_ptr) in new_component_indices.iter().zip(new_component_pointers) {
                 let col = arch.column_of_mut(comp_idx).unwrap_unchecked();
 
                 // Replace the old component with the new component of the same
@@ -555,9 +540,9 @@ impl Archetypes {
         use handle_components::ProcessState::*;
 
         let mut process = Process::new(
-            src_arch.component_indices().iter().copied(),
-            dst_arch.component_indices().iter().copied(),
-            new_component_indices.iter().copied(),
+            src_arch.component_indices().iter(),
+            dst_arch.component_indices().iter(),
+            new_component_indices.iter(),
         );
 
         loop {
@@ -798,7 +783,7 @@ pub struct Archetype {
     /// The index of this archetype. Provided here for convenience.
     index: ArchetypeIdx,
     /// Component indices of this archetype, one per column in sorted order.
-    component_indices: ComponentIndices,
+    component_indices: BitSet<ComponentIdx>,
     /// Columns of component data in this archetype. Sorted by component index.
     ///
     /// This is a `Box<[Column]>` with the length stripped out. The length field
@@ -818,7 +803,7 @@ impl Archetype {
     fn empty() -> Self {
         Self {
             index: ArchetypeIdx::EMPTY,
-            component_indices: ComponentIndices::empty(),
+            component_indices: BitSet::<ComponentIdx>::new(),
             columns: NonNull::dangling(),
             entity_ids: vec![],
             refresh_listeners: BTreeSet::new(),
@@ -833,14 +818,14 @@ impl Archetype {
     /// All component indices must be valid.
     unsafe fn new(
         arch_idx: ArchetypeIdx,
-        component_indices: ComponentIndices,
+        component_indices: BitSet<ComponentIdx>,
         components: &mut Components,
     ) -> Self {
         // Create a column for each component and register this archetype in the
         // component infos.
         let columns: Box<[DataStore]> = component_indices
             .iter()
-            .map(|&idx| {
+            .map(|idx| {
                 // SAFETY: Caller guaranteed the component indices are valid.
                 let info = unsafe { components.get_by_index_mut(idx).unwrap_unchecked() };
 
@@ -935,12 +920,9 @@ impl Archetype {
         &self.entity_ids
     }
 
-    /// Returns a sorted list of component indices corresponding to the
+    /// Returns a bit set of component indices corresponding to the
     /// component types of this archetype's columns.
-    ///
-    /// The returned list has the same length as the slice returned by
-    /// [`columns`](Archetype::columns).
-    pub fn component_indices(&self) -> &ComponentIndices {
+    pub(crate) fn component_indices(&self) -> &BitSet<ComponentIdx> {
         &self.component_indices
     }
 
@@ -957,14 +939,22 @@ impl Archetype {
     /// Finds the column with the given component. Returns `None` if it doesn't
     /// exist.
     pub(crate) fn column_of(&self, idx: ComponentIdx) -> Option<&DataStore> {
-        let idx = self.component_indices().binary_search(&idx).ok()?;
+        if !self.component_indices().contains(idx) {
+            return None;
+        }
+        
+        let idx = self.component_indices().count_less(idx);
 
         // SAFETY: `binary_search` ensures `idx` is in bounds.
         Some(unsafe { &*self.get_ptr(idx) })
     }
 
     pub(crate) fn column_of_mut(&mut self, idx: ComponentIdx) -> Option<&mut DataStore> {
-        let idx = self.component_indices().binary_search(&idx).ok()?;
+        if !self.component_indices().contains(idx) {
+            return None;
+        }
+
+        let idx = self.component_indices().count_less(idx);
 
         // SAFETY: `binary_search` ensures `idx` is in bounds.
         Some(unsafe { &mut *self.get_ptr(idx) })
@@ -1070,7 +1060,8 @@ impl fmt::Debug for Archetype {
 #[cfg(test)]
 mod tests {
     use std::alloc::Layout;
-
+    use crate::bit_set::BitSet;
+    use crate::component::ComponentIdx;
     use crate::prelude::*;
 
     #[derive(Component)]
@@ -1147,10 +1138,13 @@ mod tests {
         let a_id = world.add_component::<A>();
         let e = world.spawn();
         world.insert(e, A);
+        
+        let mut components = BitSet::<ComponentIdx>::new();
+        components.insert(a_id.index());
 
         assert!(world
             .archetypes()
-            .get_by_components(&[a_id.index()])
+            .get_by_components(&components)
             .is_some());
     }
 

@@ -20,8 +20,7 @@ pub use targeted::*;
 
 use crate::access::Access;
 use crate::archetype::Archetype;
-use crate::component::ComponentSet;
-use crate::component_indices::ComponentIndices;
+use crate::component::{ComponentIdx, ComponentSet};
 #[allow(unused_imports)] // `ComponentSetInternal` import used in docs
 use crate::component_set_internals::{ComponentPointerConsumer, ComponentSetInternal};
 use crate::drop::{drop_fn_of, DropFn};
@@ -111,7 +110,7 @@ pub enum EventKind {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct InsertKindInfo {
     /// The indices of the components to insert.
-    pub(crate) component_indices: ComponentIndices,
+    pub(crate) component_indices: BitSet<ComponentIdx>,
     /// Permutation used to sort the component set.
     pub(crate) permutation: Permutation,
     /// A type-erased function pointer to the [`get_components`] function of
@@ -125,7 +124,7 @@ pub struct InsertKindInfo {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct RemoveKindInfo {
     /// The indices of the components to remove.
-    pub(crate) component_indices: ComponentIndices,
+    pub(crate) component_indices: BitSet<ComponentIdx>,
 }
 
 /// Data needed to create a new event.
@@ -1005,7 +1004,7 @@ all_tuples!(impl_event_set_tuple, 0, 64, E, e);
 // after their invalidation.
 fn initialize_component_set<C: ComponentSet>(
     world: &mut World,
-) -> Result<(Permutation, ComponentIndices), ()> {
+) -> Result<(Permutation, BitSet<ComponentIdx>), ()> {
     /// Returns `true` if the given sorted slice contains any duplicates. This
     /// function assumes that `a == b` if and only if `a` and `b` are adjacent
     /// in the slice. If this condition is violated, the function will
@@ -1038,9 +1037,7 @@ fn initialize_component_set<C: ComponentSet>(
     if sorted_slice_contains_duplicates(&component_indices) {
         Err(())
     } else {
-        // SAFETY: We just sorted `component_indices` and checked that it does
-        // not contain duplicates.
-        let component_indices = unsafe { ComponentIndices::new_unchecked(component_indices) };
+        let component_indices = BitSet::<ComponentIdx>::from_iter(component_indices);
 
         // Return the permutation and the component indices.
         Ok((permutation, component_indices))
@@ -1152,6 +1149,7 @@ mod remove_value {
 }
 
 pub use remove_value::*;
+use crate::bit_set::BitSet;
 
 impl<C: ?Sized> Copy for Remove<C> {}
 

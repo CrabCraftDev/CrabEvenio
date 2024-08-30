@@ -16,7 +16,6 @@ pub mod archetype;
 mod bit_set;
 mod boxed_slice;
 pub mod component;
-pub mod component_indices;
 mod component_set_internals;
 mod data_store;
 mod data_type;
