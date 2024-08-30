@@ -7,10 +7,10 @@ use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::ops::{BitOr, BitOrAssign, BitXor, BitXorAssign};
 use core::{any, fmt};
+use core::hash::{Hash, Hasher};
 use crate::sparse::SparseIndex;
 
 /// A set data structure backed by a vector of bits.
-#[derive(Hash)]
 pub(crate) struct BitSet<T = usize> {
     blocks: Vec<Block>,
     _marker: PhantomData<T>,
@@ -380,6 +380,19 @@ impl<T: SparseIndex> PartialEq for BitSet<T> {
 }
 
 impl<T: SparseIndex> Eq for BitSet<T> {}
+
+impl<T: SparseIndex> Hash for BitSet<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Iterating over the blocks in reverse and skipping the first blocks
+        // that are zero is equivalent to skipping trailing zero blocks. We need
+        // to do this for consistency with our PartialEq implementation. If we
+        // didn't, two sets that are equal, but differ in trailing zero blocks,
+        // would be hashed differently.
+        for &block in self.blocks.iter().rev().skip_while(|&&block| block == 0) {
+            state.write_usize(block);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
