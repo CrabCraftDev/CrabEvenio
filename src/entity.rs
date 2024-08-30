@@ -222,21 +222,6 @@ impl ReservedEntities {
         }
     }
 
-    /// Drains the queue and spawns all its reserved entities using the provided
-    /// function that constructs their locations using their ids.
-    pub(crate) fn spawn_all(
-        &mut self,
-        entities: &mut Entities,
-        mut f: impl FnMut(EntityId) -> EntityLocation,
-    ) {
-        for _ in 0..self.count {
-            entities.add_with(&mut f);
-        }
-
-        self.iter = entities.locs.next_key_iter();
-        self.count = 0;
-    }
-
     /// Spawns a single reserved entity using the provided function that
     /// constructs its location using its id.
     pub(crate) fn spawn_one(

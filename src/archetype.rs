@@ -76,12 +76,6 @@ impl Archetypes {
         unsafe { self.archetypes.get(0).unwrap_unchecked() }
     }
 
-    /// Returns a mutable reference to the empty archetype.
-    pub(crate) fn empty_mut(&mut self) -> &mut Archetype {
-        // SAFETY: The empty archetype is always at index 0.
-        unsafe { self.archetypes.get_mut(0).unwrap_unchecked() }
-    }
-
     /// Gets a reference to the archetype identified by the given
     /// [`ArchetypeIdx`]. Returns `None` if the index is invalid.
     pub fn get(&self, idx: ArchetypeIdx) -> Option<&Archetype> {
