@@ -74,6 +74,7 @@ impl Components {
                         layout: desc.layout,
                         drop: desc.drop,
                         mutability: desc.mutability,
+                        spawn_events: BTreeSet::new(),
                         insert_events: BTreeSet::new(),
                         remove_events: BTreeSet::new(),
                         member_of: IndexSet::with_hasher(RandomState::new()),
@@ -101,6 +102,7 @@ impl Components {
             layout: desc.layout,
             drop: desc.drop,
             mutability: desc.mutability,
+            spawn_events: BTreeSet::new(),
             insert_events: BTreeSet::new(),
             remove_events: BTreeSet::new(),
             member_of: IndexSet::with_hasher(RandomState::new()),
@@ -229,6 +231,7 @@ pub struct ComponentInfo {
     layout: Layout,
     drop: DropFn,
     mutability: Mutability,
+    pub(crate) spawn_events: BTreeSet<TargetedEventId>,
     pub(crate) insert_events: BTreeSet<TargetedEventId>,
     pub(crate) remove_events: BTreeSet<TargetedEventId>,
     /// The set of archetypes that have this component as one of its columns.
@@ -268,6 +271,13 @@ impl ComponentInfo {
     /// Gets the [`Mutability`] of the component.
     pub fn mutability(&self) -> Mutability {
         self.mutability
+    }
+
+    /// Gets the set of [`Spawn`] events for this component.
+    ///
+    /// [`Spawn`]: crate::event::Spawn
+    pub fn spawn_events(&self) -> &BTreeSet<TargetedEventId> {
+        &self.spawn_events
     }
 
     /// Gets the set of [`Insert`] events for this component.
@@ -479,7 +489,7 @@ mod tests {
         let mut world = World::new();
 
         world.add_component::<A>();
-        let e1 = world.spawn();
+        let e1 = world.spawn(());
         world.insert(e1, A("hello".into()));
         let s1 = world.add_handler(|_: Receiver<E>, mut a: Single<&mut A>| {
             a.0.push_str("hello");
@@ -496,7 +506,7 @@ mod tests {
         );
 
         world.add_component::<B>();
-        let e2 = world.spawn();
+        let e2 = world.spawn(());
         assert!(world.entities().contains(e2));
         world.insert(e2, B(vec![]));
         let s2 = world.add_handler(|_: Receiver<E>, mut b: Single<&mut B>| {
@@ -528,9 +538,9 @@ mod tests {
         let c2 = world.add_component::<B>();
         let c3 = world.add_component::<C>();
 
-        let e1 = world.spawn();
-        let e2 = world.spawn();
-        let e3 = world.spawn();
+        let e1 = world.spawn(());
+        let e2 = world.spawn(());
+        let e3 = world.spawn(());
 
         world.insert(e1, A);
 

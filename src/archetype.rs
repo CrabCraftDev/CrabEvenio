@@ -1077,7 +1077,7 @@ mod tests {
     fn insert_overwrites() {
         let mut world = World::new();
 
-        let e = world.spawn();
+        let e = world.spawn(());
 
         world.insert(e, C("hello".into()));
 
@@ -1095,10 +1095,10 @@ mod tests {
 
         let mut world = World::new();
 
-        let e1 = world.spawn();
+        let e1 = world.spawn(());
         world.insert(e1, Zst);
 
-        let e2 = world.spawn();
+        let e2 = world.spawn(());
         world.insert(e2, Zst);
     }
 
@@ -1115,13 +1115,13 @@ mod tests {
 
         let mut world = World::new();
 
-        let a = world.spawn();
+        let a = world.spawn(());
         world.insert(a, A);
 
-        let b = world.spawn();
+        let b = world.spawn(());
         world.insert(b, B);
 
-        let ab = world.spawn();
+        let ab = world.spawn(());
         world.insert(ab, A);
         world.insert(ab, B);
         world.insert(ab, C);
@@ -1136,7 +1136,7 @@ mod tests {
 
         let mut world = World::new();
         let a_id = world.add_component::<A>();
-        let e = world.spawn();
+        let e = world.spawn(());
         world.insert(e, A);
         
         let mut components = BitSet::<ComponentIdx>::new();
@@ -1163,7 +1163,7 @@ mod tests {
         println!("{:?}", Layout::new::<C>());
 
         let mut world = World::new();
-        let e = world.spawn();
+        let e = world.spawn(());
 
         world.insert(e, (A, B, C));
         world.get::<&A>(e).unwrap();

@@ -24,8 +24,9 @@ use crate::entity::{Entities, EntityId, EntityLocation, ReservedEntities};
 use crate::event::{
     AddGlobalEvent, AddTargetedEvent, Despawn, EventDescriptor, EventKind, EventMeta, EventPtr,
     EventQueueItem, GlobalEvent, GlobalEventId, GlobalEventIdx, GlobalEventInfo, GlobalEvents,
-    Insert, InsertKindInfo, Remove, RemoveGlobalEvent, RemoveKindInfo, RemoveTargetedEvent, Spawn,
-    TargetedEvent, TargetedEventId, TargetedEventIdx, TargetedEventInfo, TargetedEvents,
+    Insert, InsertedComponentsInfo, Remove, RemoveGlobalEvent, RemoveTargetedEvent,
+    RemovedComponentsInfo, Spawn, SpawnInfo, TargetedEvent, TargetedEventId, TargetedEventIdx,
+    TargetedEventInfo, TargetedEvents,
 };
 use crate::handler::{
     AddHandler, Handler, HandlerConfig, HandlerId, HandlerInfo, HandlerInfoInner, HandlerList,
@@ -142,7 +143,7 @@ impl World {
     ///
     /// world.add_handler(my_handler);
     ///
-    /// let target = world.spawn();
+    /// let target = world.spawn(());
     ///
     /// // Send my event to `target` entity.
     /// world.send_to(target, MyEvent(123));
@@ -159,26 +160,38 @@ impl World {
     }
 
     /// Creates a new entity, returns its [`EntityId`], and sends the [`Spawn`]
-    /// event to signal its creation.
+    /// event to signal its creation. The entity is spawned with the given set
+    /// of components attached. Note that this set can be empty.
     ///
-    /// The new entity is spawned without any components attached. The returned
-    /// `EntityId` will not have been used by any previous entities in this
-    /// world.
+    /// The returned `EntityId` will not have been used by any previous entities
+    /// in this world.
     ///
     /// # Examples
     ///
     /// ```
     /// use evenio::prelude::*;
     ///
-    /// let mut world = World::new();
-    /// let id = world.spawn();
+    /// #[derive(Component)]
+    /// struct ComponentA;
     ///
-    /// assert!(world.entities().contains(id));
+    /// #[derive(Component)]
+    /// struct ComponentB;
+    ///
+    /// let mut world = World::new();
+    ///
+    /// // Spawn entity without components.
+    /// let id_1 = world.spawn(());
+    ///
+    /// // Spawn entity with components.
+    /// let id_2 = world.spawn((ComponentA, ComponentB));
+    ///
+    /// assert!(world.entities().contains(id_1));
+    /// assert!(world.entities().contains(id_2));
     /// ```
-    pub fn spawn(&mut self) -> EntityId {
+    pub fn spawn<C: ComponentSet>(&mut self, components: C) -> EntityId {
         let id = self.reserved_entities.reserve(&self.entities);
 
-        self.send(Spawn(id));
+        self.send(Spawn(id, components));
 
         id
     }
@@ -193,7 +206,7 @@ impl World {
     /// #
     /// # let mut world = World::new();
     /// #
-    /// # let entity = world.spawn();
+    /// # let entity = world.spawn(());
     /// #
     /// # #[derive(Component)]
     /// # struct C;
@@ -215,7 +228,7 @@ impl World {
     /// #
     /// # let mut world = World::new();
     /// #
-    /// # let entity = world.spawn();
+    /// # let entity = world.spawn(());
     /// #
     /// # #[derive(Component)]
     /// # struct C;
@@ -235,7 +248,7 @@ impl World {
     /// #
     /// # let mut world = World::new();
     /// #
-    /// # let entity = world.spawn();
+    /// # let entity = world.spawn(());
     /// #
     /// world.send_to(entity, Despawn);
     /// ```
@@ -268,7 +281,7 @@ impl World {
     ///
     /// let mut world = World::new();
     ///
-    /// let e = world.spawn();
+    /// let e = world.spawn(());
     /// world.insert(e, MyComponent(123));
     ///
     /// assert_eq!(world.get::<&MyComponent>(e), Some(&MyComponent(123)));
@@ -298,7 +311,7 @@ impl World {
     ///
     /// let mut world = World::new();
     ///
-    /// let e = world.spawn();
+    /// let e = world.spawn(());
     /// world.insert(e, MyComponent(123));
     ///
     /// assert_eq!(
@@ -675,11 +688,14 @@ impl World {
 
         let info = &self.components[component];
 
-        // Remove all the `Insert` and `Remove` events for this component.
+        // Remove all the `Spawn`, `Insert` and `Remove` events for this
+        // component.
+        // TODO: Merge these sets into one?
         let events_to_remove = info
-            .insert_events()
+            .spawn_events()
             .iter()
             .copied()
+            .chain(info.insert_events().iter().copied())
             .chain(info.remove_events().iter().copied())
             .collect::<Vec<_>>();
 
@@ -922,7 +938,7 @@ impl World {
 
             match kind {
                 EventKind::Normal => {}
-                EventKind::Insert(InsertKindInfo {
+                EventKind::Insert(InsertedComponentsInfo {
                     component_indices,
                     permutation: _,
                     get_components: _,
@@ -933,14 +949,28 @@ impl World {
                         }
                     }
                 }
-                EventKind::Remove(RemoveKindInfo { component_indices }) => {
+                EventKind::Remove(RemovedComponentsInfo { component_indices }) => {
                     for component_idx in component_indices {
                         if let Some(info) = self.components.get_by_index_mut(component_idx) {
                             info.remove_events.insert(id);
                         }
                     }
                 }
-                EventKind::Spawn => {}
+                EventKind::Spawn(SpawnInfo {
+                    components_field_offset: _,
+                    inserted_components:
+                        InsertedComponentsInfo {
+                            component_indices,
+                            permutation: _,
+                            get_components: _,
+                        },
+                }) => {
+                    for component_idx in component_indices {
+                        if let Some(info) = self.components.get_by_index_mut(component_idx) {
+                            info.spawn_events.insert(id);
+                        }
+                    }
+                }
                 EventKind::Despawn => {}
             }
 
@@ -1057,7 +1087,7 @@ impl World {
 
         match info.kind() {
             EventKind::Normal => {}
-            EventKind::Insert(InsertKindInfo {
+            EventKind::Insert(InsertedComponentsInfo {
                 component_indices,
                 permutation: _,
                 get_components: _,
@@ -1068,14 +1098,28 @@ impl World {
                     }
                 }
             }
-            EventKind::Remove(RemoveKindInfo { component_indices }) => {
+            EventKind::Remove(RemovedComponentsInfo { component_indices }) => {
                 for component_idx in component_indices {
                     if let Some(info) = self.components.get_by_index_mut(component_idx) {
                         info.remove_events.remove(&event);
                     }
                 }
             }
-            EventKind::Spawn => {}
+            EventKind::Spawn(SpawnInfo {
+                components_field_offset: _,
+                inserted_components:
+                    InsertedComponentsInfo {
+                        component_indices,
+                        permutation: _,
+                        get_components: _,
+                    },
+            }) => {
+                for component_idx in component_indices {
+                    if let Some(info) = self.components.get_by_index_mut(component_idx) {
+                        info.spawn_events.remove(&event);
+                    }
+                }
+            }
             EventKind::Despawn => {}
         }
 
@@ -1279,7 +1323,7 @@ impl World {
                     // Ordinary event. Run drop fn.
                     unsafe { ctx.drop_event() };
                 }
-                EventKind::Insert(InsertKindInfo {
+                EventKind::Insert(InsertedComponentsInfo {
                     component_indices,
                     permutation,
                     get_components,
@@ -1331,13 +1375,12 @@ impl World {
                     // in case one of the above functions panics.
                     ctx.unpack();
                 }
-                EventKind::Remove(RemoveKindInfo { component_indices }) => {
+                EventKind::Remove(RemovedComponentsInfo { component_indices }) => {
                     // `Remove` doesn't need drop.
                     let _ = ctx.unpack();
 
                     let src_arch = self.archetypes().get(target_location.archetype).unwrap();
-                    let mut dst_component_indices =
-                        src_arch.component_indices().clone();
+                    let mut dst_component_indices = src_arch.component_indices().clone();
                     dst_component_indices.remove_all(component_indices);
                     let dst = unsafe {
                         self.archetypes.create_archetype(
@@ -1357,7 +1400,17 @@ impl World {
                         )
                     };
                 }
-                EventKind::Spawn => {
+                EventKind::Spawn(SpawnInfo {
+                    components_field_offset: _,
+                    inserted_components:
+                        InsertedComponentsInfo {
+                            component_indices,
+                            permutation: _,
+                            get_components: _,
+                        },
+                }) => {
+                    // TODO: Spawn with components.
+                    
                     // `Spawn` doesn't need drop.
                     let _ = ctx.unpack();
 
@@ -1548,7 +1601,7 @@ mod tests {
         struct C;
 
         let mut world = World::new();
-        let e = world.spawn();
+        let e = world.spawn(());
         world.insert(e, C);
         world.get_mut::<(&mut C, &mut C)>(e);
     }

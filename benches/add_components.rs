@@ -33,7 +33,7 @@ fn spawn_many_comps_n_evenio(bencher: Bencher, count: u64) {
     let mut world = World::new();
 
     bencher.bench_local(|| {
-        let e = world.spawn();
+        let e = world.spawn(());
 
         add_components!(world, e, count,
             0 1 2 3 4 5 6 7 8 9 10
@@ -72,7 +72,7 @@ fn spawn_many_comps_40_evenio(bencher: Bencher) {
     let mut world = World::new();
 
     bencher.bench_local(|| {
-        let e = world.spawn();
+        let e = world.spawn(());
 
         add_components!(
             world, e,

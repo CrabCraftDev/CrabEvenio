@@ -915,7 +915,7 @@ mod tests {
                 let mut matching = crate::map::IndexSet::<EntityId>::default();
 
                 $(
-                    let e = world.spawn();
+                    let e = world.spawn(());
                     matching.insert(e);
                     $(
                         world.insert(e, $matched_comp);
@@ -924,7 +924,7 @@ mod tests {
 
                 $(
                     #[allow(unused_variables)]
-                    let e = world.spawn();
+                    let e = world.spawn(());
                     $(
                         world.insert(e, $ignored_comp);
                     )*
@@ -933,7 +933,7 @@ mod tests {
                 #[derive(Component)]
                 struct Matching(crate::map::IndexSet<EntityId>);
 
-                let matching_entity = world.spawn();
+                let matching_entity = world.spawn(());
                 world.insert(matching_entity, Matching(matching));
 
                 world.add_handler(move |_: Receiver<E>, f: Fetcher<(EntityId, $query)>, mut matching: Single<&mut Matching>| {

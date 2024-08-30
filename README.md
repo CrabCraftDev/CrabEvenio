@@ -49,7 +49,7 @@ pub fn main() {
 
     // Spawn a new entity and add the `Position` and `Velocity` components to it.
     // We'll store the entity's ID in a variable for later use.
-    let e = world.spawn();
+    let e = world.spawn(());
     world.insert(e, Position { x: 0.0, y: 0.0 });
     world.insert(e, Velocity { x: 1.0, y: 0.4 });
 

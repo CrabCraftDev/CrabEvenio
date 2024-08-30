@@ -30,7 +30,7 @@ fn iter_simple_evenio<const PARALLEL: bool>(bencher: Bencher, len: usize) {
     let mut world = World::new();
 
     for i in 0..len {
-        let e = world.spawn();
+        let e = world.spawn(());
 
         world.insert(e, C1(42.0));
 
@@ -115,7 +115,7 @@ fn iter_mandelbrot_evenio<const PARALLEL: bool>(bencher: Bencher, iters: usize) 
 
     for y in 0..IMAGE_SIZE {
         for x in 0..IMAGE_SIZE {
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, Pixel(x, y));
             world.insert(e, Output(false));
         }

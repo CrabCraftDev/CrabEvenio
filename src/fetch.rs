@@ -516,7 +516,7 @@ where
 ///     println!("The data is: {data:?}");
 /// });
 ///
-/// let e = world.spawn();
+/// let e = world.spawn(());
 /// world.insert(e, MyComponent(123));
 ///
 /// world.send(E);
@@ -989,10 +989,10 @@ mod tests {
     fn random_access() {
         let mut world = World::new();
 
-        let e = world.spawn();
-        let e2 = world.spawn();
-        let e3 = world.spawn();
-        world.spawn();
+        let e = world.spawn(());
+        let e2 = world.spawn(());
+        let e3 = world.spawn(());
+        world.spawn(());
 
         world.insert(e, C1(123));
         world.insert(e2, C1(456));
@@ -1025,11 +1025,11 @@ mod tests {
     fn fetch_many_mut() {
         let mut world = World::new();
 
-        let e1 = world.spawn();
+        let e1 = world.spawn(());
         world.insert(e1, C1(123));
-        let e2 = world.spawn();
+        let e2 = world.spawn(());
         world.insert(e2, C1(456));
-        let e3 = world.spawn();
+        let e3 = world.spawn(());
         world.insert(e3, C1(789));
 
         world.add_handler(move |_: Receiver<E1>, mut f: Fetcher<&mut C1>| {
@@ -1057,9 +1057,9 @@ mod tests {
 
         let mut world = World::new();
 
-        let e1 = world.spawn();
-        let e2 = world.spawn();
-        let e3 = world.spawn();
+        let e1 = world.spawn(());
+        let e2 = world.spawn(());
+        let e3 = world.spawn(());
 
         world.add_handler(move |_: Receiver<E1>, mut f: Fetcher<CustomQuery>| {
             assert_eq!(
@@ -1080,7 +1080,7 @@ mod tests {
         let mut set = BTreeSet::new();
 
         for i in 0..20_u32 {
-            let e = world.spawn();
+            let e = world.spawn(());
 
             world.insert(e, C1(i.pow(2)));
 
@@ -1116,7 +1116,7 @@ mod tests {
         const N: u32 = 20;
 
         for i in 0..N {
-            let e = world.spawn();
+            let e = world.spawn(());
 
             world.insert(e, C1(i));
 
@@ -1160,7 +1160,7 @@ mod tests {
             }
         });
 
-        let e = world.spawn();
+        let e = world.spawn(());
         world.send(E1);
         world.despawn(e);
         world.send(E1);
@@ -1173,7 +1173,7 @@ mod tests {
         let count = 20;
 
         for i in 1..=count {
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C1(i));
 
             if i % 2 == 0 {
@@ -1201,7 +1201,7 @@ mod tests {
         let mut world = World::new();
 
         {
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C1(123));
         }
 
@@ -1228,9 +1228,9 @@ mod tests {
         let mut world = World::new();
 
         {
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C1(123));
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C1(456));
         }
 
@@ -1244,12 +1244,12 @@ mod tests {
         let mut world = World::new();
 
         {
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C2(123));
 
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C3(123));
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C3(456));
         }
 

@@ -73,7 +73,7 @@ fn send_many_targeted_events(bencher: Bencher) {
     #[derive(TargetedEvent, Component)]
     struct D(#[allow(dead_code)] u64);
 
-    let e = world.spawn();
+    let e = world.spawn(());
     world.insert(e, A(123));
     world.insert(e, B(456));
     world.insert(e, C(789));

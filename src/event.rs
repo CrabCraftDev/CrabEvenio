@@ -9,7 +9,7 @@ use alloc::{vec, vec::Vec};
 use core::alloc::Layout;
 use core::any::TypeId;
 use core::marker::PhantomData;
-use core::mem::transmute;
+use core::mem::{offset_of, transmute};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{any, fmt, slice, str};
@@ -97,18 +97,25 @@ pub enum EventKind {
     #[default]
     Normal,
     /// The [`Insert`] event.
-    Insert(InsertKindInfo),
+    Insert(InsertedComponentsInfo),
     /// The [`Remove`] event.
-    Remove(RemoveKindInfo),
+    Remove(RemovedComponentsInfo),
     /// The [`Spawn`] event.
-    Spawn,
+    Spawn(SpawnInfo),
     /// The [`Despawn`] event.
     Despawn,
 }
 
+/// Additional data for [`EventKind::Spawn`].
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct SpawnInfo {
+    pub(crate) components_field_offset: usize,
+    pub(crate) inserted_components: InsertedComponentsInfo,
+}
+
 /// Additional data for [`EventKind::Insert`].
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct InsertKindInfo {
+pub struct InsertedComponentsInfo {
     /// The indices of the components to insert.
     pub(crate) component_indices: BitSet<ComponentIdx>,
     /// Permutation used to sort the component set.
@@ -122,7 +129,7 @@ pub struct InsertKindInfo {
 
 /// Additional data for [`EventKind::Remove`].
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RemoveKindInfo {
+pub struct RemovedComponentsInfo {
     /// The indices of the components to remove.
     pub(crate) component_indices: BitSet<ComponentIdx>,
 }
@@ -717,22 +724,23 @@ impl<'a, ES: EventSet> Sender<'a, ES> {
         };
     }
 
-    /// Queue the creation of a new entity.
+    /// Queue the creation of a new entity with an initial set of components.
+    /// Note that this set can be empty.
     ///
     /// This returns the [`EntityId`] of the to-be-spawned entity and queues the
     /// [`Spawn`] event. Note that the returned `EntityId` may not be valid
     /// until after the `Spawn` event has finished broadcasting.
     ///
-    /// The new entity will be spawned without any components attached, and the
-    /// returned `EntityId` will not have been used by any previous entities.
+    /// The returned `EntityId` will not have been used by any previous
+    /// entities.
     ///
     /// # Panics
     ///
     /// Panics if `Spawn` is not in the [`EventSet`] of this sender.
     #[track_caller]
-    pub fn spawn(&self) -> EntityId {
+    pub fn spawn<C: ComponentSet>(&self, components: C) -> EntityId {
         let id = unsafe { self.world.queue_spawn() };
-        self.send(Spawn(id));
+        self.send(Spawn(id, components));
         id
     }
 
@@ -1093,7 +1101,7 @@ unsafe impl<C: ComponentSet> Event for Insert<C> {
         let Ok((permutation, component_indices)) = initialize_component_set::<C>(world) else {
             panic!("component set contains duplicates");
         };
-        EventKind::Insert(InsertKindInfo {
+        EventKind::Insert(InsertedComponentsInfo {
             component_indices,
             permutation,
             get_components: get_components_fn_of::<C>(),
@@ -1153,6 +1161,7 @@ mod remove_value {
 }
 
 pub use remove_value::*;
+
 use crate::bit_set::BitSet;
 
 impl<C: ?Sized> Copy for Remove<C> {}
@@ -1182,7 +1191,7 @@ unsafe impl<C: ComponentSet> Event for Remove<C> {
         let Ok((_permutation, component_indices)) = initialize_component_set::<C>(world) else {
             panic!("component set contains duplicates");
         };
-        EventKind::Remove(RemoveKindInfo { component_indices })
+        EventKind::Remove(RemovedComponentsInfo { component_indices })
     }
 }
 
@@ -1193,18 +1202,27 @@ unsafe impl<C: ComponentSet> Event for Remove<C> {
 /// Note that the event by itself cannot be used to spawn new entities. Use
 /// [`World::spawn`] or [`Sender::spawn`] instead.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[repr(transparent)]
-pub struct Spawn(pub EntityId);
+pub struct Spawn<C>(pub EntityId, pub C);
 
-unsafe impl Event for Spawn {
+unsafe impl<C: ComponentSet> Event for Spawn<C> {
     type This<'a> = Self;
 
     type EventIdx = GlobalEventIdx;
 
     type Mutability = Immutable;
 
-    fn init(_world: &mut World) -> EventKind {
-        EventKind::Spawn
+    fn init(world: &mut World) -> EventKind {
+        let Ok((permutation, component_indices)) = initialize_component_set::<C>(world) else {
+            panic!("component set contains duplicates");
+        };
+        EventKind::Spawn(SpawnInfo {
+            components_field_offset: offset_of!(Self, 1),
+            inserted_components: InsertedComponentsInfo {
+                component_indices,
+                permutation,
+                get_components: get_components_fn_of::<C>(),
+            },
+        })
     }
 }
 
@@ -1222,7 +1240,7 @@ unsafe impl Event for Spawn {
 ///
 /// let mut world = World::new();
 ///
-/// let id = world.spawn();
+/// let id = world.spawn(());
 ///
 /// assert!(world.entities().contains(id));
 ///
@@ -1273,7 +1291,7 @@ mod tests {
             r.query.0.push_str("123");
         });
 
-        let e = world.spawn();
+        let e = world.spawn(());
         world.insert(e, C("abc".into()));
 
         world.send_to(e, E);
@@ -1308,7 +1326,7 @@ mod tests {
 
         let mut world = World::new();
 
-        let res = world.spawn();
+        let res = world.spawn(());
         world.insert(res, Result(vec![]));
 
         world.add_handler(get_a_send_b);
@@ -1338,7 +1356,7 @@ mod tests {
         let n = 50;
 
         for i in 0..n {
-            let e = world.spawn();
+            let e = world.spawn(());
             world.insert(e, C(i));
             entities.push(e);
         }

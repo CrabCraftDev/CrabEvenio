@@ -320,9 +320,9 @@ let mut world = World::new();
 
 // Spawn three entities without any components.
 // `spawn()` returns a lightweight handle we can use to look up the entity later.
-let player = world.spawn();
-let monster = world.spawn();
-let something_else = world.spawn();
+let player = world.spawn(());
+let monster = world.spawn(());
+let something_else = world.spawn(());
 
 // Insert the player components.
 world.insert(player, Health(100));
@@ -385,7 +385,7 @@ fn init_monster_handler(
 world.add_handler(init_monster_handler);
 
 // Test our new handler:
-let entity = world.spawn();
+let entity = world.spawn(());
 world.send(InitMonster {
     entity,
     pos: [24.0, 24.0],
@@ -412,7 +412,7 @@ Alternatively, if we just want to remove components without deleting the entire 
 #[derive(Component)]
 struct A;
 
-let e = world.spawn();
+let e = world.spawn(());
 world.insert(e, A);
 
 // Component exists.
@@ -461,14 +461,14 @@ struct A(&'static str);
 #[derive(Component, Debug)]
 struct B(i32);
 
-let e1 = world.spawn();
+let e1 = world.spawn(());
 world.insert(e1, A("foo"));
 world.insert(e1, B(123));
 
-let e2 = world.spawn();
+let e2 = world.spawn(());
 world.insert(e2, A("bar"));
 
-let e3 = world.spawn();
+let e3 = world.spawn(());
 world.insert(e3, B(456));
 
 world.add_handler(move |_: Receiver<E>, fetcher: Fetcher<&A>| {
@@ -607,7 +607,7 @@ struct MyGlobalData {
     bar: &'static str,
 }
 
-let e = world.spawn();
+let e = world.spawn(());
 world.insert(e, MyGlobalData { foo: 123, bar: "data" });
 
 world.add_handler(|_: Receiver<E>, g: Single<&MyGlobalData>| {
@@ -664,7 +664,7 @@ world.add_handler(|mut receiver: Receiver<MyTargetedEvent, (&mut Health, &Stamin
     }
 });
 
-let e = world.spawn();
+let e = world.spawn(());
 world.insert(e, Health(20));
 world.insert(e, Stamina(100));
 
@@ -702,7 +702,7 @@ Attempting to get a mutable reference to the UUID component will fail at compile
 # #[derive(Component)]
 # #[component(immutable)]
 # struct Uuid(u128);
-let e = world.spawn();
+let e = world.spawn(());
 world.insert(e, Uuid(12345));
 
 // Does not compile.
@@ -721,7 +721,7 @@ Note that handlers listening for an `Insert` event will run _before_ the compone
 # struct Uuid(u128);
 world.add_handler(detect_uuid_overwrite);
 
-let e = world.spawn();
+let e = world.spawn(());
 world.insert(e, Uuid(123)); // Doesn't panic
 world.insert(e, Uuid(456)); // Panics
 
@@ -740,7 +740,7 @@ To make this completely airtight, we'll also need to protect against removing th
 # struct Uuid(u128);
 world.add_handler(detect_uuid_remove);
 
-let e = world.spawn();
+let e = world.spawn(());
 world.remove::<Uuid>(e); // Doesn't panic
 world.insert(e, Uuid(123));
 world.remove::<Uuid>(e); // Panics

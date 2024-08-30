@@ -1537,7 +1537,7 @@ mod tests {
 
         world.add_handler(c);
 
-        let e = world.spawn();
+        let e = world.spawn(());
         world.insert(e, Tracker(String::new()));
 
         world.send_to(e, E);

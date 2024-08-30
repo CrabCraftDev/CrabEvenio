@@ -216,6 +216,9 @@ impl ReservedEntities {
     pub(crate) fn reserve(&mut self, entities: &Entities) -> EntityId {
         if let Some(k) = self.iter.next(&entities.locs) {
             self.count += 1;
+            if self.count > 1 {
+                panic!("TOO MANY ENTITIIEEEES")
+            }
             EntityId(k)
         } else {
             panic!("too many entities")
@@ -254,12 +257,12 @@ mod tests {
     fn spawn_despawn_entity() {
         let mut world = World::new();
 
-        let e1 = world.spawn();
+        let e1 = world.spawn(());
         assert!(world.entities().contains(e1));
         world.despawn(e1);
         assert!(!world.entities().contains(e1));
 
-        let e2 = world.spawn();
+        let e2 = world.spawn(());
         assert!(world.entities().contains(e2));
         assert!(!world.entities().contains(e1));
         assert_ne!(e1, e2);
@@ -281,14 +284,14 @@ mod tests {
         }
 
         world.add_handler(|_: Receiver<E1>, s: Sender<(Despawn, E2)>| {
-            let a = s.spawn();
-            let b = s.spawn();
+            let a = s.spawn(());
+            let b = s.spawn(());
             s.despawn(b);
             s.send(E2 { a, b });
         });
 
         world.add_handler(|r: Receiver<E2>, s: Sender<()>| {
-            let c = s.spawn();
+            let c = s.spawn(());
             assert_ne!(r.event.a, c);
             assert_ne!(r.event.b, c);
         });
@@ -301,7 +304,7 @@ mod tests {
         #[derive(GlobalEvent)]
         struct E;
 
-        world.add_handler(|r: Receiver<Spawn>, entities: &Entities| {
+        world.add_handler(|r: Receiver<Spawn<()>>, entities: &Entities| {
             assert!(entities.contains(r.event.0));
         });
     }

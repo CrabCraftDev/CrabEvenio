@@ -33,7 +33,7 @@ fn random_access_evenio(bencher: Bencher) {
             }
 
             for i in 0..TOTAL_ENTITIES {
-                let e = $world.spawn();
+                let e = $world.spawn(());
 
                 if i % (TOTAL_ENTITIES / FETCHED_COUNT) == 0 {
                     $entities.push(e);
