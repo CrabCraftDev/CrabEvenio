@@ -94,16 +94,15 @@ impl Archetypes {
         self.archetypes.get_mut(idx.0 as usize)
     }
 
-    /// Gets a reference to the archetype with the given set of components.
+    /// Gets the index of the archetype with the given set of components.
     ///
     /// Returns `None` if there is no archetype with the given set of
     /// components.
     pub(crate) fn get_by_components(
         &self,
         components: &BitSet<ComponentIdx>,
-    ) -> Option<&Archetype> {
-        let idx = *self.by_components.get(components)?;
-        Some(unsafe { self.get(idx).unwrap_unchecked() })
+    ) -> Option<ArchetypeIdx> {
+        self.by_components.get(components).copied()
     }
 
     /// Spawns a new entity with the given ID and returns its location.

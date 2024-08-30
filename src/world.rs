@@ -1409,16 +1409,13 @@ impl World {
                             get_components,
                         },
                 }) => {
-                    let arch = unsafe {
+                    let arch = ctx.world.archetypes.get_by_components(&component_indices).unwrap_or_else(|| unsafe {
                         ctx.world.archetypes.create_archetype(
-                            // TODO: This clone can be avoided if we first check
-                            //  if the archetype already exists, which doesn't
-                            //  require an owned BitSet.
                             component_indices.clone(),
                             &mut ctx.world.components,
                             &mut ctx.world.handlers,
                         )
-                    };
+                    });
 
                     // The offset of the `components` field of the event is
                     // stored in the event kind.
