@@ -157,7 +157,7 @@ impl<T: SparseIndex> BitSet<T> {
             return before_block as usize;
         };
         // all ones until bit_index
-        let mask = !(!0 >> bit_index);
+        let mask = !(!0 << bit_index);
         let in_block = (block & mask).count_ones();
         (before_block + in_block) as usize
     }

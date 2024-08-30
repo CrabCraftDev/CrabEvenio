@@ -1359,7 +1359,9 @@ impl World {
                     // SAFETY: We just ensured that the buffer's capacity is
                     // sufficient. Elements being uninitialized is not an issue,
                     // because they are MaybeUninit values anyway.
-                    unsafe { buffer.set_len(permutation.len()); }
+                    unsafe {
+                        buffer.set_len(permutation.len());
+                    }
 
                     // Create a `ComponentPointerConsumer` with the event's
                     // permutation to sort the collected component pointers.
@@ -1421,13 +1423,17 @@ impl World {
                             get_components,
                         },
                 }) => {
-                    let arch = ctx.world.archetypes.get_by_components(&component_indices).unwrap_or_else(|| unsafe {
-                        ctx.world.archetypes.create_archetype(
-                            component_indices.clone(),
-                            &mut ctx.world.components,
-                            &mut ctx.world.handlers,
-                        )
-                    });
+                    let arch = ctx
+                        .world
+                        .archetypes
+                        .get_by_components(&component_indices)
+                        .unwrap_or_else(|| unsafe {
+                            ctx.world.archetypes.create_archetype(
+                                component_indices.clone(),
+                                &mut ctx.world.components,
+                                &mut ctx.world.handlers,
+                            )
+                        });
 
                     // The offset of the `components` field of the event is
                     // stored in the event kind.
@@ -1440,7 +1446,9 @@ impl World {
                     // SAFETY: We just ensured that the buffer's capacity is
                     // sufficient. Elements being uninitialized is not an issue,
                     // because they are MaybeUninit values anyway.
-                    unsafe { buffer.set_len(permutation.len()); }
+                    unsafe {
+                        buffer.set_len(permutation.len());
+                    }
 
                     // Create a `ComponentPointerConsumer` with the event's
                     // permutation to sort the collected component pointers.
