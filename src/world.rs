@@ -17,9 +17,8 @@ use crate::archetype::Archetypes;
 use crate::bit_set::BitSet;
 use crate::component::{
     AddComponent, Component, ComponentDescriptor, ComponentId, ComponentIdx, ComponentInfo,
-    ComponentSet, Components, RemoveComponent,
+    ComponentPointerConsumer, ComponentSet, Components, RemoveComponent,
 };
-use crate::component_set_internals::ComponentPointerConsumer;
 use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{Entities, EntityId, EntityLocation, ReservedEntities};
 use crate::event::{
@@ -585,7 +584,7 @@ impl World {
         // TODO: Use an ArrayVec here and in other places where we call
         //  ComponentSet::add_components or ::remove_components? We know the
         //  maximum capacity, and this would save us a heap allocation.
-        let mut ids = Vec::with_capacity(C::LEN);
+        let mut ids = Vec::with_capacity(C::len());
         C::add_components(self, |id| ids.push(id));
         ids
     }
@@ -810,7 +809,7 @@ impl World {
     ///
     /// [`remove_component`]: World::remove_component
     pub fn remove_components<C: ComponentSet>(&mut self) -> Vec<ComponentInfo> {
-        let mut infos = Vec::with_capacity(C::LEN);
+        let mut infos = Vec::with_capacity(C::len());
         C::remove_components(self, |id| infos.push(id));
         infos
     }

@@ -20,9 +20,7 @@ pub use targeted::*;
 
 use crate::access::Access;
 use crate::archetype::Archetype;
-use crate::component::{ComponentIdx, ComponentSet};
-#[allow(unused_imports)] // `ComponentSetInternal` import used in docs
-use crate::component_set_internals::{ComponentPointerConsumer, ComponentSetInternal};
+use crate::component::{ComponentIdx, ComponentSet, ComponentPointerConsumer};
 use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{EntityId, EntityLocation};
 use crate::fetch::FetcherState;
