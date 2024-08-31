@@ -35,16 +35,17 @@ impl<Q: Query> FetcherState<Q> {
     }
 
     /// Initializes the fetcher state with a world and handler config. This
-    /// also initializes the query.
-    pub(crate) fn init(world: &mut World, config: &mut HandlerConfig) -> Self {
+    /// also initializes the query. Returns an expression describing the
+    /// components accessed by the query and calls `add_referenced_component`
+    /// with each component the query references.
+    pub(crate) fn init(
+        world: &mut World,
+        add_referenced_component: impl FnMut(ComponentIdx),
+    ) -> (Self, ComponentAccess) {
         let state = Q::new_state(world);
-        let ca = Q::get_access(&state, |idx| {
-            config.referenced_components.insert(idx);
-        });
+        let access = Q::get_access(&state, add_referenced_component);
 
-        config.push_component_access(ca);
-
-        FetcherState::new(state)
+        (FetcherState::new(state), access)
     }
 
     /// Execute the query for an entity. Returns the query's result or a
@@ -473,7 +474,11 @@ where
     type This<'a> = Fetcher<'a, Q>;
 
     fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
-        FetcherState::init(world, config)
+        let (state, access) = FetcherState::init(world, |idx| {
+            config.referenced_components.insert(idx);
+        });
+        config.push_component_access(access);
+        state
     }
 
     unsafe fn get<'a>(
@@ -551,7 +556,11 @@ unsafe impl<Q: Query + 'static> HandlerParam for Single<Q> {
     type This<'a> = Single<Q::This<'a>>;
 
     fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
-        FetcherState::init(world, config)
+        let (state, access) = FetcherState::init(world, |idx| {
+            config.referenced_components.insert(idx);
+        });
+        config.push_component_access(access);
+        state
     }
 
     #[track_caller]
@@ -640,7 +649,11 @@ unsafe impl<Q: Query + 'static> HandlerParam for TrySingle<Q> {
     type This<'a> = Result<Q::This<'a>, SingleError>;
 
     fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
-        FetcherState::init(world, config)
+        let (state, access) = FetcherState::init(world, |idx| {
+            config.referenced_components.insert(idx);
+        });
+        config.push_component_access(access);
+        state
     }
 
     unsafe fn get<'a>(
@@ -846,6 +859,9 @@ where
 #[cfg(feature = "rayon")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rayon")))]
 pub use rayon_impl::*;
+
+use crate::access::ComponentAccess;
+use crate::component::ComponentIdx;
 
 #[cfg(feature = "rayon")]
 mod rayon_impl {
