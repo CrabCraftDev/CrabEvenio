@@ -34,10 +34,10 @@ impl<Q: Query> FetcherState<Q> {
         }
     }
 
-    /// Initializes the fetcher state with a world and handler config. This
-    /// also initializes the query. Returns an expression describing the
-    /// components accessed by the query and calls `add_referenced_component`
-    /// with each component the query references.
+    /// Initializes the fetcher state with a world. This also initializes the
+    /// query. Returns an expression describing the components accessed by
+    /// the query and calls `add_referenced_component` with each component
+    /// the query references.
     pub(crate) fn init(
         world: &mut World,
         add_referenced_component: impl FnMut(ComponentIdx),
