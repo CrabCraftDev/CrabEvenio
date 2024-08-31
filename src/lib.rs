@@ -46,7 +46,7 @@ pub use rayon;
 /// use evenio::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::component::{Component, ComponentId};
+    pub use crate::component::{Component, ComponentSet, ComponentId};
     pub use crate::entity::EntityId;
     pub use crate::event::{
         Despawn, EventMut, GlobalEvent, GlobalEventId, Insert, Receiver, ReceiverMut, Remove,

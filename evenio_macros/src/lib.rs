@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 
 mod all_tuples;
 mod component;
+mod component_set;
 mod event;
 mod handler_param;
 mod query;
@@ -65,6 +66,15 @@ pub fn derive_targeted_event(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Component, attributes(component))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     component::derive_component(input.into())
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
+}
+
+/// Derive macro for `ComponentSet`. See `ComponentSet`'s documentation for more
+/// information.
+#[proc_macro_derive(ComponentSet, attributes(query))]
+pub fn derive_component_set(input: TokenStream) -> TokenStream {
+    component_set::derive_component_set(input.into())
         .unwrap_or_else(|e| e.into_compile_error())
         .into()
 }

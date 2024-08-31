@@ -9,7 +9,7 @@ use core::mem::MaybeUninit;
 
 use ahash::RandomState;
 use evenio_macros::all_tuples;
-pub use evenio_macros::Component;
+pub use evenio_macros::{Component, ComponentSet};
 
 use crate::archetype::{Archetype, ArchetypeIdx};
 use crate::drop::DropFn;
@@ -618,6 +618,32 @@ mod tests {
 
     #[derive(GlobalEvent)]
     struct E;
+    
+    #[test]
+    fn derive_component_set() {
+        #[derive(Component, Clone, Debug, Eq, PartialEq)]
+        struct A(String);
+        
+        #[derive(Component, Clone, Debug, Eq, PartialEq)]
+        struct B(String);
+        
+        #[derive(ComponentSet, Clone, Debug, Eq, PartialEq)]
+        struct StructSet {
+            a: A,
+            b: B,
+        }
+        
+        let mut world = World::new();
+        let set = StructSet {
+            a: A("foo".to_owned()),
+            b: B("bar".to_owned()),
+        };
+        let e = world.spawn(set.clone());
+        
+        // TODO: `world.get::<&StructSet>(e)` should work!
+        assert_eq!(world.get::<&A>(e), Some(&set.a));
+        assert_eq!(world.get::<&B>(e), Some(&set.b));
+    }
 
     #[test]
     fn remove_component() {
