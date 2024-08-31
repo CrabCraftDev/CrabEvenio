@@ -369,9 +369,7 @@ impl World {
 
         let handler_name = handler.name();
 
-        if let Err(e) = handler.init(self, &mut config) {
-            return Err(format!("initialization of {handler_name} failed: {e}"));
-        }
+        handler.init(self, &mut config);
 
         let received_event = match config.received_event {
             ReceivedEventId::None => {

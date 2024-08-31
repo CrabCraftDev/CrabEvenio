@@ -20,11 +20,11 @@ pub use targeted::*;
 
 use crate::access::Access;
 use crate::archetype::Archetype;
-use crate::component::{ComponentIdx, ComponentSet, ComponentPointerConsumer};
+use crate::component::{ComponentIdx, ComponentPointerConsumer, ComponentSet};
 use crate::drop::{drop_fn_of, DropFn};
 use crate::entity::{EntityId, EntityLocation};
 use crate::fetch::FetcherState;
-use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam, InitError};
+use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam};
 use crate::mutability::{Immutable, Mutability, MutabilityMarker, Mutable};
 use crate::permutation::Permutation;
 use crate::prelude::Component;
@@ -405,13 +405,11 @@ unsafe impl<E: GlobalEvent> HandlerParam for Receiver<'_, E> {
 
     type This<'a> = Receiver<'a, E>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         let event_id = world.add_global_event::<E>();
 
         config.set_received_event(event_id);
         config.set_received_event_access(Access::Read);
-
-        Ok(())
     }
 
     unsafe fn get<'a>(
@@ -452,7 +450,7 @@ unsafe impl<E: TargetedEvent, Q: Query + 'static> HandlerParam for Receiver<'_, 
 
     type This<'a> = Receiver<'a, E, Q>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         let event_id = world.add_targeted_event::<E>();
 
         let state = Q::new_state(world);
@@ -465,7 +463,7 @@ unsafe impl<E: TargetedEvent, Q: Query + 'static> HandlerParam for Receiver<'_, 
         config.set_targeted_event_component_access(ca.clone());
         config.push_component_access(ca);
 
-        Ok(FetcherState::new(state))
+        FetcherState::new(state)
     }
 
     unsafe fn get<'a>(
@@ -528,13 +526,11 @@ where
 
     type This<'a> = ReceiverMut<'a, E>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         let event_id = world.add_global_event::<E>();
 
         config.set_received_event(event_id);
         config.set_received_event_access(Access::ReadWrite);
-
-        Ok(())
     }
 
     unsafe fn get<'a>(
@@ -576,7 +572,7 @@ where
 
     type This<'a> = ReceiverMut<'a, E, Q>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         let event_id = world.add_targeted_event::<E>();
 
         let state = Q::new_state(world);
@@ -589,7 +585,7 @@ where
         config.set_targeted_event_component_access(ca.clone());
         config.push_component_access(ca);
 
-        Ok(FetcherState::new(state))
+        FetcherState::new(state)
     }
 
     unsafe fn get<'a>(
@@ -866,7 +862,7 @@ unsafe impl<T: EventSet> HandlerParam for Sender<'_, T> {
 
     type This<'a> = Sender<'a, T>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         config.set_event_queue_access(Access::ReadWrite);
 
         let state = T::new_indices(world);
@@ -879,7 +875,7 @@ unsafe impl<T: EventSet> HandlerParam for Sender<'_, T> {
             }
         });
 
-        Ok(state)
+        state
     }
 
     unsafe fn get<'a>(
@@ -1019,7 +1015,7 @@ fn initialize_component_set<C: ComponentSet>(
         if slice.is_empty() {
             return false;
         }
-        
+
         // TODO: Use `slice.array_windows().any(|[a, b]| a == b)` once
         //  `[T]::array_windows` is stabilized.
         for i in 0..slice.len() - 1 {

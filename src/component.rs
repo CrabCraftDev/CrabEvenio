@@ -4,8 +4,8 @@ use alloc::borrow::Cow;
 use alloc::collections::BTreeSet;
 use core::alloc::Layout;
 use core::any::TypeId;
-use core::ops::Index;
 use core::mem::MaybeUninit;
+use core::ops::Index;
 
 use ahash::RandomState;
 use evenio_macros::all_tuples;
@@ -15,7 +15,7 @@ use crate::archetype::{Archetype, ArchetypeIdx};
 use crate::drop::DropFn;
 use crate::entity::EntityLocation;
 use crate::event::{EventPtr, GlobalEvent, TargetedEventId};
-use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam, InitError};
+use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam};
 use crate::map::{Entry, IndexSet, TypeIdMap};
 use crate::mutability::{Mutability, MutabilityMarker};
 use crate::permutation::Permutation;
@@ -205,9 +205,7 @@ unsafe impl HandlerParam for &'_ Components {
 
     type This<'a> = &'a Components;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(())
-    }
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {}
 
     unsafe fn get<'a>(
         _state: &'a mut Self::State,
@@ -618,28 +616,28 @@ mod tests {
 
     #[derive(GlobalEvent)]
     struct E;
-    
+
     #[test]
     fn derive_component_set() {
         #[derive(Component, Clone, Debug, Eq, PartialEq)]
         struct A(String);
-        
+
         #[derive(Component, Clone, Debug, Eq, PartialEq)]
         struct B(String);
-        
+
         #[derive(ComponentSet, Clone, Debug, Eq, PartialEq)]
         struct StructSet {
             a: A,
             b: B,
         }
-        
+
         let mut world = World::new();
         let set = StructSet {
             a: A("foo".to_owned()),
             b: B("bar".to_owned()),
         };
         let e = world.spawn(set.clone());
-        
+
         // TODO: `world.get::<&StructSet>(e)` should work!
         assert_eq!(world.get::<&A>(e), Some(&set.a));
         assert_eq!(world.get::<&B>(e), Some(&set.b));

@@ -11,7 +11,7 @@ use crate::archetype::{Archetype, ArchetypeIdx, ArchetypeRow, Archetypes};
 use crate::assume_unchecked;
 use crate::entity::{Entities, EntityId, EntityLocation};
 use crate::event::EventPtr;
-use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam, InitError};
+use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam};
 use crate::query::{Query, ReadOnlyQuery};
 use crate::sparse_map::SparseMap;
 use crate::world::{UnsafeWorldCell, World};
@@ -36,7 +36,7 @@ impl<Q: Query> FetcherState<Q> {
 
     /// Initializes the fetcher state with a world and handler config. This
     /// also initializes the query.
-    pub(crate) fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self, InitError> {
+    pub(crate) fn init(world: &mut World, config: &mut HandlerConfig) -> Self {
         let state = Q::new_state(world);
         let ca = Q::get_access(&state, |idx| {
             config.referenced_components.insert(idx);
@@ -44,7 +44,7 @@ impl<Q: Query> FetcherState<Q> {
 
         config.push_component_access(ca);
 
-        Ok(FetcherState::new(state))
+        FetcherState::new(state)
     }
 
     /// Execute the query for an entity. Returns the query's result or a
@@ -472,7 +472,7 @@ where
 
     type This<'a> = Fetcher<'a, Q>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         FetcherState::init(world, config)
     }
 
@@ -550,7 +550,7 @@ unsafe impl<Q: Query + 'static> HandlerParam for Single<Q> {
 
     type This<'a> = Single<Q::This<'a>>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         FetcherState::init(world, config)
     }
 
@@ -639,7 +639,7 @@ unsafe impl<Q: Query + 'static> HandlerParam for TrySingle<Q> {
 
     type This<'a> = Result<Q::This<'a>, SingleError>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         FetcherState::init(world, config)
     }
 

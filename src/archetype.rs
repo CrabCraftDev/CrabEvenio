@@ -20,7 +20,7 @@ use crate::data_type::DataType;
 use crate::entity::{Entities, EntityId, EntityLocation};
 use crate::event::{EventId, EventPtr, TargetedEventIdx};
 use crate::handler::{
-    HandlerConfig, HandlerInfo, HandlerInfoPtr, HandlerList, HandlerParam, Handlers, InitError,
+    HandlerConfig, HandlerInfo, HandlerInfoPtr, HandlerList, HandlerParam, Handlers,
 };
 use crate::map::HashMap;
 use crate::prelude::World;
@@ -727,9 +727,7 @@ unsafe impl HandlerParam for &'_ Archetypes {
 
     type This<'a> = &'a Archetypes;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(())
-    }
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {}
 
     unsafe fn get<'a>(
         _state: &'a mut Self::State,

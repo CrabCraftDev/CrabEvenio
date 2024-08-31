@@ -10,7 +10,7 @@ use super::{Event, EventDescriptor, EventKind, EventPtr, Mutability};
 use crate::archetype::Archetype;
 use crate::drop::DropFn;
 use crate::entity::EntityLocation;
-use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam, InitError};
+use crate::handler::{HandlerConfig, HandlerInfo, HandlerParam};
 use crate::map::{Entry, TypeIdMap};
 use crate::slot_map::{Key, SlotMap};
 use crate::sparse::SparseIndex;
@@ -214,9 +214,7 @@ unsafe impl HandlerParam for &'_ TargetedEvents {
 
     type This<'a> = &'a TargetedEvents;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(())
-    }
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {}
 
     unsafe fn get<'a>(
         _state: &'a mut Self::State,

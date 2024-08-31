@@ -237,9 +237,7 @@ unsafe impl HandlerParam for &'_ Handlers {
 
     type This<'a> = &'a Handlers;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(())
-    }
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {}
 
     unsafe fn get<'a>(
         _state: &'a mut Self::State,
@@ -681,7 +679,7 @@ impl<H: Handler> Handler for NoTypeId<H> {
         self.0.name()
     }
 
-    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) -> Result<(), InitError> {
+    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) {
         self.0.init(world, config)
     }
 
@@ -717,7 +715,7 @@ impl<H: Handler> Handler for HighPriority<H> {
         self.0.name()
     }
 
-    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) -> Result<(), InitError> {
+    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) {
         let res = self.0.init(world, config);
         config.set_priority(HandlerPriority::High);
         res
@@ -755,7 +753,7 @@ impl<H: Handler> Handler for LowPriority<H> {
         self.0.name()
     }
 
-    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) -> Result<(), InitError> {
+    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) {
         let res = self.0.init(world, config);
         config.set_priority(HandlerPriority::Low);
         res
@@ -796,8 +794,8 @@ pub trait Handler: 'static {
     /// Returns the name of this handler for debugging purposes.
     fn name(&self) -> Cow<'static, str>;
 
-    /// Initializes the handler. Returns [`InitError`] on failure.
-    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) -> Result<(), InitError>;
+    /// Initializes the handler.
+    fn init(&mut self, world: &mut World, config: &mut HandlerConfig);
 
     /// Execute the handler by passing in the handler's metadata, a pointer to
     /// the received event of the configured type, the entity location of
@@ -1059,10 +1057,7 @@ pub unsafe trait HandlerParam {
     type This<'a>;
 
     /// Initializes the handler using the input [`World`] and [`HandlerConfig`].
-    ///
-    /// If initialization fails, [`InitError`] is returned and the handler is
-    /// not considered initialized.
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError>;
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State;
 
     /// Obtains a new instance of the handler parameter.
     ///
@@ -1096,9 +1091,7 @@ unsafe impl<T> HandlerParam for PhantomData<T> {
 
     type This<'a> = Self;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(())
-    }
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {}
 
     unsafe fn get<'a>(
         _state: &'a mut Self::State,
@@ -1124,12 +1117,12 @@ macro_rules! impl_handler_param_tuple {
             type This<'a> = ($($P::This<'a>,)*);
 
             #[inline]
-            fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-                Ok((
+            fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
+                (
                     $(
-                        $P::init(world, config)?,
+                        $P::init(world, config),
                     )*
-                ))
+                )
             }
 
             #[inline]
@@ -1217,9 +1210,8 @@ where
         Cow::Borrowed(any::type_name::<F>())
     }
 
-    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) -> Result<(), InitError> {
-        self.state = Some(<F::Param as HandlerParam>::init(world, config)?);
-        Ok(())
+    fn init(&mut self, world: &mut World, config: &mut HandlerConfig) {
+        self.state = Some(<F::Param as HandlerParam>::init(world, config));
     }
 
     unsafe fn run(
@@ -1334,8 +1326,8 @@ unsafe impl<T: Default + 'static> HandlerParam for Local<'_, T> {
 
     type This<'a> = Local<'a, T>;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(T::default())
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {
+        T::default()
     }
 
     unsafe fn get<'a>(
@@ -1379,9 +1371,7 @@ unsafe impl HandlerParam for &'_ HandlerInfo {
 
     type This<'a> = &'a HandlerInfo;
 
-    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Result<Self::State, InitError> {
-        Ok(())
-    }
+    fn init(_world: &mut World, _config: &mut HandlerConfig) -> Self::State {}
 
     unsafe fn get<'a>(
         _state: &'a mut Self::State,
@@ -1405,7 +1395,7 @@ unsafe impl<P: HandlerParam> HandlerParam for std::sync::Mutex<P> {
 
     type This<'a> = std::sync::Mutex<P::This<'a>>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         P::init(world, config)
     }
 
@@ -1435,7 +1425,7 @@ unsafe impl<P: HandlerParam> HandlerParam for std::sync::RwLock<P> {
 
     type This<'a> = std::sync::RwLock<P::This<'a>>;
 
-    fn init(world: &mut World, config: &mut HandlerConfig) -> Result<Self::State, InitError> {
+    fn init(world: &mut World, config: &mut HandlerConfig) -> Self::State {
         P::init(world, config)
     }
 
