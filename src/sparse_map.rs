@@ -118,6 +118,10 @@ impl<K: SparseIndex, V> SparseMap<K, V> {
     pub(crate) fn values(&self) -> &[V] {
         &self.dense
     }
+    
+    pub(crate) fn into_keys_values(self) -> (Vec<K>, Vec<V>) {
+        (self.indices, self.dense)
+    }
 
     pub(crate) fn values_mut(&mut self) -> &mut [V] {
         &mut self.dense

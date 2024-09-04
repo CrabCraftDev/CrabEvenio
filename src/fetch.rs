@@ -1,5 +1,6 @@
 //! Accessing components on entities.
 
+use alloc::vec;
 use core::iter::FusedIterator;
 use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
@@ -190,6 +191,43 @@ impl<Q: Query> FetcherState<Q> {
                 len: archetypes.get(indices[0]).unwrap_unchecked().len() as u32,
                 archetypes,
             }
+        }
+    }
+
+    /// Returns an iterator over the results of this query for each entity in an
+    /// archetype that the query matches.
+    ///
+    /// # Safety
+    ///
+    /// Must have permission to access the components that the query accesses.
+    #[inline]
+    pub(crate) unsafe fn into_iter(self, archetypes: &Archetypes) -> IntoIter<Q> {
+        self.into_iter_unchecked(archetypes)
+    }
+
+    /// Returns an iterator over the results of this query for each entity in an
+    /// archetype that the query matches.
+    ///
+    /// # Safety
+    ///
+    /// Must have permission to access the components that the query accesses.
+    unsafe fn into_iter_unchecked(self, archetypes: &Archetypes) -> IntoIter<Q> {
+        let (indices, states) = self.map.into_keys_values();
+        let mut indices = indices.into_iter();
+        let mut states = states.into_iter();
+        let index = indices.next();
+        let current_state = states.next();
+
+        IntoIter {
+            indices,
+            states,
+            current_state,
+            row: ArchetypeRow(0),
+            len: index
+                .and_then(|index| archetypes.get(index))
+                .map(|arch| arch.len() as u32)
+                .unwrap_or_default(),
+            archetypes,
         }
     }
 
@@ -839,6 +877,121 @@ where
 }
 
 impl<'a, Q> RefUnwindSafe for Iter<'a, Q>
+where
+    Q: Query,
+    Q::This<'a>: RefUnwindSafe,
+{
+}
+
+/// Iterator over entities matching the query `Q`.
+///
+/// Entities are visited in a deterministic but otherwise unspecified order.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct IntoIter<'a, Q: Query> {
+    states: vec::IntoIter<Q::ArchState>,
+    indices: vec::IntoIter<ArchetypeIdx>,
+    current_state: Option<Q::ArchState>,
+    /// Current row of the current archetype.
+    row: ArchetypeRow,
+    /// Number of entities in the current archetype.
+    len: u32,
+    archetypes: &'a Archetypes,
+}
+
+impl<'a, Q: Query> Iterator for IntoIter<'a, Q> {
+    type Item = Q::This<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        // If we reached the end of the current archetype, move on to the next
+        // or return `None`.
+        if self.row.0 == self.len {
+            // Move on to the next archetype.
+            self.current_state = self.states.next();
+            #[allow(clippy::question_mark)] // more readable like this
+            if self.current_state.is_none() {
+                return None;
+            }
+            let idx = self.indices.next().unwrap();
+
+            let arch = unsafe { self.archetypes.get(idx).unwrap_unchecked() };
+
+            self.row = ArchetypeRow(0);
+            self.len = arch.len() as u32;
+
+            // SAFETY: Fetcher state only contains nonempty archetypes.
+            unsafe { assume_unchecked(self.len > 0) };
+        }
+
+        // Execute the query for the current entity.
+        let state = self.current_state.as_ref().unwrap();
+        let item = unsafe { Q::get(state, self.row) };
+
+        // Move on to the next row (entity) in the archetype.
+        self.row.0 += 1;
+
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<Q: Query> ExactSizeIterator for IntoIter<'_, Q> {
+    fn len(&self) -> usize {
+        // The number of rows in the current archetype which we did not iterate
+        // over yet.
+        let mut remaining = self.len - self.row.0;
+
+        // Add the number of rows of each remaining archetype to `remaining`.
+        for idx in self.indices.as_slice() {
+            remaining += unsafe { self.archetypes.get(*idx).unwrap_unchecked() }.len() as u32;
+        }
+
+        // Return the total.
+        remaining as usize
+    }
+}
+
+impl<Q: Query> FusedIterator for IntoIter<'_, Q> {}
+
+impl<Q: Query> fmt::Debug for IntoIter<'_, Q> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Iter")
+            .field("states", &self.states)
+            .field("indices", &self.indices)
+            .field("current_state", &self.current_state)
+            .field("row", &self.row)
+            .field("len", &self.len)
+            .field("archetypes", &self.archetypes)
+            .finish()
+    }
+}
+
+unsafe impl<'a, Q> Send for IntoIter<'_, Q>
+where
+    Q: Query,
+    Q::This<'a>: Send,
+{
+}
+
+unsafe impl<'a, Q> Sync for IntoIter<'a, Q>
+where
+    Q: Query,
+    Q::This<'a>: Sync,
+{
+}
+
+impl<'a, Q> UnwindSafe for IntoIter<'a, Q>
+where
+    Q: Query,
+    Q::This<'a>: UnwindSafe,
+{
+}
+
+impl<'a, Q> RefUnwindSafe for IntoIter<'a, Q>
 where
     Q: Query,
     Q::This<'a>: RefUnwindSafe,

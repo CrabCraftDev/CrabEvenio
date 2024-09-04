@@ -12,6 +12,7 @@ use core::{fmt, mem, slice};
 use ahash::RandomState;
 use slab::Slab;
 
+use crate::access::ComponentAccess;
 use crate::assume_unchecked;
 use crate::bit_set::BitSet;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
@@ -19,11 +20,13 @@ use crate::data_store::DataStore;
 use crate::data_type::DataType;
 use crate::entity::{Entities, EntityId, EntityLocation};
 use crate::event::{EventId, EventPtr, TargetedEventIdx};
+use crate::fetch::FetcherState;
 use crate::handler::{
     HandlerConfig, HandlerInfo, HandlerInfoPtr, HandlerList, HandlerParam, Handlers,
 };
 use crate::map::HashMap;
 use crate::prelude::World;
+use crate::query::Query;
 use crate::sparse::SparseIndex;
 use crate::sparse_map::SparseMap;
 use crate::world::UnsafeWorldCell;
@@ -147,6 +150,17 @@ impl Archetypes {
     /// Returns a count of the archetypes.
     pub fn len(&self) -> usize {
         self.archetypes.len()
+    }
+
+    pub(crate) fn init_fetcher<Q: Query>(
+        &self,
+        fetcher_state: &mut FetcherState<Q>,
+        component_access: &ComponentAccess,
+    ) {
+        // TODO: use a `Component -> Vec<Archetype>` index to make this faster?
+        for (_, arch) in &self.archetypes {
+            arch.init_fetcher(fetcher_state, component_access);
+        }
     }
 
     /// Registers an event handler for all archetypes.
@@ -870,6 +884,21 @@ impl Archetype {
             entity_ids: vec![],
             refresh_listeners: BTreeSet::new(),
             event_listeners: SparseMap::new(),
+        }
+    }
+
+    fn init_fetcher<Q: Query>(
+        &self,
+        fetcher_state: &mut FetcherState<Q>,
+        component_access: &ComponentAccess,
+    ) {
+        // Tell the fetcher about this archetype.
+        if component_access.matches_archetype(|idx| self.column_of(idx).is_some())
+        {
+            // Don't call `refresh_archetype` if this archetype is empty.
+            if self.len() > 0 {
+                fetcher_state.refresh_archetype(self);
+            }
         }
     }
 

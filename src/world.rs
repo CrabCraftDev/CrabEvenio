@@ -28,6 +28,8 @@ use crate::event::{
     RemovedComponentsInfo, Spawn, SpawnInfo, TargetedEvent, TargetedEventId, TargetedEventIdx,
     TargetedEventInfo, TargetedEvents,
 };
+use crate::fetch;
+use crate::fetch::FetcherState;
 use crate::handler::{
     AddHandler, Handler, HandlerConfig, HandlerId, HandlerInfo, HandlerInfoInner, HandlerList,
     Handlers, IntoHandler, MaybeInvalidAccess, ReceivedEventId, RemoveHandler,
@@ -296,13 +298,17 @@ impl World {
 
         let state = Q::get_new_state(self)?;
         let arch_state = Q::new_arch_state(arch, &state)?;
-        // Don't need to check component access here, because the query is
-        // read-only anyway (no aliased mutability possible).
+        // SAFETY: Don't need to check component access here, because the query
+        // is read-only anyway (no aliased mutability possible).
         unsafe { Some(Q::get(&arch_state, loc.row)) }
     }
 
     /// Queries an entity. Returns `None` if the entity doesn't exist or doesn't
     /// match the query.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the query would result in aliased mutability.
     ///
     /// # Examples
     ///
@@ -341,7 +347,92 @@ impl World {
 
             panic!("{}", message);
         }
+        // SAFETY: Just checked component access.
         unsafe { Some(Q::get(&arch_state, loc.row)) }
+    }
+
+    /// Iterates over all results of a read-only query. Returns `None` if any
+    /// component referenced by the query does not exist.
+    pub fn iter<Q: ReadOnlyQuery>(&self) -> Option<fetch::IntoIter<Q>> {
+        let query_state = Q::get_new_state(self)?;
+        let access = Q::get_access(&query_state, |_idx| {});
+        let mut fetcher_state = FetcherState::new(query_state);
+        self.archetypes.init_fetcher(&mut fetcher_state, &access);
+        // SAFETY: Don't need to check component access here, because the query
+        // is read-only anyway (no aliased mutability possible).
+        unsafe { Some(fetcher_state.into_iter(&self.archetypes)) }
+    }
+
+    /// Iterates over all results of a query. Returns `None` if any component
+    /// referenced by the query does not exist.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the query would result in aliased mutability.
+    pub fn iter_mut<Q: Query>(&mut self) -> Option<fetch::IntoIter<Q>> {
+        let query_state = Q::get_new_state(self)?;
+        let access = Q::get_access(&query_state, |_idx| {});
+        let conflicts = access.collect_conflicts();
+        if !conflicts.is_empty() {
+            let mut message = "called World::iter_mut with a query that has conflicting component \
+                               access (aliased mutability)\n"
+                .to_owned();
+
+            self.conflicts_error_message(&mut message, conflicts);
+
+            panic!("{}", message);
+        }
+        let mut fetcher_state = FetcherState::new(query_state);
+        self.archetypes.init_fetcher(&mut fetcher_state, &access);
+        // SAFETY: Just checked component access.
+        unsafe { Some(fetcher_state.into_iter(&self.archetypes)) }
+    }
+
+    /// Runs a read-only query for all entities and returns the only result.
+    /// This is useful for storing global resources as components that only one
+    /// entity has. Returns `None` if any component referenced by the query does
+    /// not exist.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is no or more than one entity that matches the query.
+    pub fn single<Q: ReadOnlyQuery>(&self) -> Option<Q::This<'_>> {
+        let mut iter = self.iter::<Q>()?;
+
+        let Some(item) = iter.next() else {
+            panic!("called World::single with a query that does not match any entity")
+        };
+
+        assert!(
+            iter.next().is_none(),
+            "called World::single with a query that matches more than one entity"
+        );
+
+        Some(item)
+    }
+
+    /// Runs a query for all entities and returns the only result. This is
+    /// useful for storing global resources as components that only one entity
+    /// has. Returns `None` if any component referenced by the query does
+    /// not exist.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is no or more than one entity that matches the query, or
+    /// if the query would result in aliased mutability.
+    pub fn single_mut<Q: Query>(&mut self) -> Option<Q::This<'_>> {
+        let mut iter = self.iter_mut::<Q>()?;
+
+        let Some(item) = iter.next() else {
+            panic!("called World::single_mut with a query that does not match any entity")
+        };
+
+        assert!(
+            iter.next().is_none(),
+            "called World::single_mut with a query that matches more than one entity"
+        );
+
+        Some(item)
     }
 
     /// Adds a new handler to the world, returns its [`HandlerId`], and sends
