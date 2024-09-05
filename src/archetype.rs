@@ -7,15 +7,13 @@ use core::hash::Hash;
 use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr::NonNull;
-use core::{fmt, mem, slice};
-use std::cmp::Ordering;
+use core::{fmt, iter, mem, slice};
 use std::collections::hash_map::Entry;
 
 use ahash::RandomState;
 use slab::Slab;
 
 use crate::access::ComponentAccess;
-use crate::archetype::advance::{Advance, CountingAdvance};
 use crate::assume_unchecked;
 use crate::bit_set::BitSet;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
@@ -36,54 +34,9 @@ use crate::sparse_map::SparseMap;
 use crate::world::UnsafeWorldCell;
 
 mod advance {
-    /// Wrapper around an iterator. Has to be advanced using the
-    /// [`advance`] method, which will cache the iterator's next element
-    /// in `self.current`.
-    ///
-    /// See also [`CountingAdvance`], a similar adapter that keeps track of how
-    /// many times it has been advanced.
-    ///
-    /// [`advance`]: Advance::advance
-    pub(crate) struct Advance<I: Iterator> {
-        current: Option<I::Item>,
-        iter: I,
-    }
-
-    impl<I: Iterator> Advance<I> {
-        /// Wraps the given iterator in an [`Advance`] adapter. This initiates
-        /// `self.current` with the iterator's first element (if any).
-        #[inline]
-        pub(crate) fn new(mut iter: I) -> Self {
-            Self {
-                current: iter.next(),
-                iter,
-            }
-        }
-
-        #[inline]
-        pub(crate) fn advance(&mut self) {
-            self.current = self.iter.next();
-        }
-
-        #[inline]
-        pub(crate) fn current(&self) -> Option<&I::Item> {
-            self.current.as_ref()
-        }
-
-        #[inline]
-        pub(crate) fn current_mut(&mut self) -> Option<&mut I::Item> {
-            self.current.as_mut()
-        }
-    }
-
-    /// Wrapper around an iterator. Has to be advanced using the
-    /// [`advance`][adv_fn] method, which will cache the iterator's next element
+    /// Wrapper around an iterator. Has to be advanced using the [`advance`]
+    /// method, which will cache the iterator's next element
     /// in `self.current` and increment `self.counter`.
-    ///
-    /// See also [`Advance`], a similar adapter that does not keep track of how
-    /// many times it has been advanced.
-    ///
-    /// [adv_fn]: CountingAdvance::advance
     pub(crate) struct CountingAdvance<I: Iterator> {
         counter: usize,
         current: Option<I::Item>,
@@ -117,11 +70,6 @@ mod advance {
         #[inline]
         pub(crate) fn current(&self) -> Option<&I::Item> {
             self.current.as_ref()
-        }
-
-        #[inline]
-        pub(crate) fn current_mut(&mut self) -> Option<&mut I::Item> {
-            self.current.as_mut()
         }
     }
 }
@@ -160,7 +108,7 @@ struct PlannedEntityMoveOperation {
     inserted_components: BitSet<ComponentIdx>,
     /// Pointers to the components to be inserted into this entity, sorted by
     /// component index. Has the same length as `inserted_components`.
-    inserted_component_pointers: Vec<*mut u8>,
+    inserted_component_pointers: Vec<NonNull<u8>>,
     /// Drop functions used to drop components to be inserted into this entity,
     /// for example when they're removed again before the move operation is
     /// finally performed.
@@ -220,118 +168,44 @@ impl Archetypes {
     pub(crate) fn plan_insert(
         &mut self,
         entity_id: EntityId,
-        inserted_component_indices: &BitSet<ComponentIdx>,
-        inserted_component_pointers: &[*mut u8],
-        inserted_component_drop_fns: &[DropFn],
+        component_idx: ComponentIdx,
+        component_ptr: NonNull<u8>,
+        component_drop_fn: DropFn,
     ) {
         match self.planned_moves.entry(entity_id) {
             Entry::Occupied(mut entry) => {
                 let planned_move = entry.get_mut();
 
-                let mut insertion_index = 0;
-                let mut old = Advance::new(planned_move.inserted_components.iter());
-                let mut new = CountingAdvance::new(inserted_component_indices.iter());
-                loop {
-                    enum State {
-                        Insert,
-                        Replace,
-                        Keep,
-                        Done,
+                let insertion_index = planned_move.inserted_components.count_less(component_idx);
+                let has_to_replace_old = planned_move.inserted_components.insert(component_idx);
+
+                if has_to_replace_old {
+                    let old_ptr = mem::replace(
+                        &mut planned_move.inserted_component_pointers[insertion_index],
+                        component_ptr,
+                    );
+                    let old_drop_fn = mem::replace(
+                        &mut planned_move.inserted_component_drop_fns[insertion_index],
+                        component_drop_fn,
+                    );
+                    if let Some(drop_fn) = old_drop_fn {
+                        unsafe { drop_fn(old_ptr) }
                     }
-
-                    let state = match (old.current(), new.current()) {
-                        (Some(&old_component_idx), Some(&new_component_idx)) => {
-                            match old_component_idx.cmp(&new_component_idx) {
-                                Ordering::Less => State::Keep,
-                                Ordering::Equal => State::Replace,
-                                Ordering::Greater => State::Insert,
-                            }
-                        }
-                        (Some(_), None) => State::Keep,
-                        (None, Some(_)) => State::Insert,
-                        (None, None) => State::Done,
-                    };
-
-                    /*
-                    old [counter=0]: 0 3 5
-                    new [counter=0]: 1 3 4
-                    (0), (3), (5)
-                    => state = WillNotFindMatchingNewForOld
-                    => keep, advance old
-
-                    old [counter=1]: 3 5
-                    new [counter=0]: 1 3 4
-                    (0), (3), (5)
-                    => state = WillNotFindMatchingOldForNew
-                    => insert, advance new
-
-                    old [counter=1]: 3 5
-                    new [counter=1]: 3 4
-                    (0), (1), (3*), (5)
-                    => state = Match
-                    => replace, advance both
-
-                    old [counter=2]: 5
-                    new [counter=2]: 4
-                    (0), (1), (3), (5)
-                    => state = WillNotFindMatchingOldForNew
-                    => insert, advance new
-
-                    old [counter=2]: 5
-                    new [counter=3]: -
-                    (0), (1), (3), (4), (5)
-                    => state = WillNotFindMatchingOldForNew
-                    => insert, advance new
-                     */
-
-                    match state {
-                        State::Keep => {
-                            insertion_index += 1;
-                            old.advance();
-                        }
-                        State::Insert => {
-                            let new_pointer = inserted_component_pointers[new.counter()];
-                            planned_move
-                                .inserted_component_pointers
-                                .insert(insertion_index, new_pointer);
-                            insertion_index += 1;
-                            new.advance();
-                        }
-                        State::Replace => {
-                            let new_pointer = inserted_component_pointers[new.counter()];
-                            let new_drop_fn = inserted_component_drop_fns[new.counter()];
-                            let old_pointer = mem::replace(
-                                &mut planned_move.inserted_component_pointers[insertion_index],
-                                new_pointer,
-                            );
-                            let old_drop_fn = mem::replace(
-                                &mut planned_move.inserted_component_drop_fns[insertion_index],
-                                new_drop_fn,
-                            );
-                            if let Some(drop_fn) = old_drop_fn {
-                                // TODO: Improve this: Store NonNulls in
-                                //  PlannedEntityMoveOperation, port the ptr
-                                //  module from the no-archetypes branch, or
-                                //  solve this another way.
-                                unsafe { drop_fn(NonNull::new_unchecked(old_pointer)) }
-                            }
-
-                            insertion_index += 1;
-                            old.advance();
-                            new.advance();
-                        }
-                        State::Done => {
-                            break;
-                        }
-                    }
+                } else {
+                    planned_move
+                        .inserted_component_pointers
+                        .insert(insertion_index, component_ptr);
+                    planned_move
+                        .inserted_component_drop_fns
+                        .insert(insertion_index, component_drop_fn);
                 }
             }
             Entry::Vacant(entry) => {
                 entry.insert(PlannedEntityMoveOperation {
                     removed_components: BitSet::new(),
-                    inserted_components: inserted_component_indices.clone(),
-                    inserted_component_pointers: inserted_component_pointers.to_vec(),
-                    inserted_component_drop_fns: inserted_component_drop_fns.to_vec(),
+                    inserted_components: BitSet::from_iter(iter::once(component_idx)),
+                    inserted_component_pointers: vec![component_ptr],
+                    inserted_component_drop_fns: vec![component_drop_fn],
                 });
             }
         }

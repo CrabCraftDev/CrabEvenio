@@ -12,6 +12,7 @@ use crate::sparse::SparseIndex;
 
 /// A set data structure backed by a vector of bits.
 pub(crate) struct BitSet<T = usize> {
+    // TODO: Use a SmallVec or similar.
     blocks: Vec<Block>,
     _marker: PhantomData<T>,
 }
