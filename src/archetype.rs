@@ -8,16 +8,20 @@ use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr::NonNull;
 use core::{fmt, mem, slice};
+use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 
 use ahash::RandomState;
 use slab::Slab;
 
 use crate::access::ComponentAccess;
+use crate::archetype::advance::{Advance, CountingAdvance};
 use crate::assume_unchecked;
 use crate::bit_set::BitSet;
 use crate::component::{ComponentIdx, ComponentInfo, Components};
 use crate::data_store::DataStore;
 use crate::data_type::DataType;
+use crate::drop::DropFn;
 use crate::entity::{Entities, EntityId, EntityLocation};
 use crate::event::{EventId, EventPtr, TargetedEventIdx};
 use crate::fetch::FetcherState;
@@ -30,6 +34,97 @@ use crate::query::Query;
 use crate::sparse::SparseIndex;
 use crate::sparse_map::SparseMap;
 use crate::world::UnsafeWorldCell;
+
+mod advance {
+    /// Wrapper around an iterator. Has to be advanced using the
+    /// [`advance`] method, which will cache the iterator's next element
+    /// in `self.current`.
+    ///
+    /// See also [`CountingAdvance`], a similar adapter that keeps track of how
+    /// many times it has been advanced.
+    ///
+    /// [`advance`]: Advance::advance
+    pub(crate) struct Advance<I: Iterator> {
+        current: Option<I::Item>,
+        iter: I,
+    }
+
+    impl<I: Iterator> Advance<I> {
+        /// Wraps the given iterator in an [`Advance`] adapter. This initiates
+        /// `self.current` with the iterator's first element (if any).
+        #[inline]
+        pub(crate) fn new(mut iter: I) -> Self {
+            Self {
+                current: iter.next(),
+                iter,
+            }
+        }
+
+        #[inline]
+        pub(crate) fn advance(&mut self) {
+            self.current = self.iter.next();
+        }
+
+        #[inline]
+        pub(crate) fn current(&self) -> Option<&I::Item> {
+            self.current.as_ref()
+        }
+
+        #[inline]
+        pub(crate) fn current_mut(&mut self) -> Option<&mut I::Item> {
+            self.current.as_mut()
+        }
+    }
+
+    /// Wrapper around an iterator. Has to be advanced using the
+    /// [`advance`][adv_fn] method, which will cache the iterator's next element
+    /// in `self.current` and increment `self.counter`.
+    ///
+    /// See also [`Advance`], a similar adapter that does not keep track of how
+    /// many times it has been advanced.
+    ///
+    /// [adv_fn]: CountingAdvance::advance
+    pub(crate) struct CountingAdvance<I: Iterator> {
+        counter: usize,
+        current: Option<I::Item>,
+        iter: I,
+    }
+
+    impl<I: Iterator> CountingAdvance<I> {
+        /// Wraps the given iterator in a [`CountingAdvance`] adapter. This
+        /// initiates `self.current` with the iterator's first element (if any)
+        /// and starts the counter at zero.
+        #[inline]
+        pub(crate) fn new(mut iter: I) -> Self {
+            Self {
+                counter: 0,
+                current: iter.next(),
+                iter,
+            }
+        }
+
+        #[inline]
+        pub(crate) fn advance(&mut self) {
+            self.counter += 1;
+            self.current = self.iter.next();
+        }
+
+        #[inline]
+        pub(crate) fn counter(&self) -> usize {
+            self.counter
+        }
+
+        #[inline]
+        pub(crate) fn current(&self) -> Option<&I::Item> {
+            self.current.as_ref()
+        }
+
+        #[inline]
+        pub(crate) fn current_mut(&mut self) -> Option<&mut I::Item> {
+            self.current.as_mut()
+        }
+    }
+}
 
 /// Contains all the [`Archetype`]s and their metadata for a world.
 ///
@@ -51,6 +146,25 @@ pub struct Archetypes {
     archetypes: Slab<Archetype>,
     // TODO: Maybe reintroduce ComponentIndicesPtr or similar?
     by_components: HashMap<BitSet<ComponentIdx>, ArchetypeIdx>,
+    // TODO: Also flush move operation if a component is removed for which there
+    //  is a drop function. Users will expect drop functions to be called
+    //  immediately after calling remove for the component.
+    planned_moves: HashMap<EntityId, PlannedEntityMoveOperation>,
+}
+
+#[derive(Debug)]
+struct PlannedEntityMoveOperation {
+    /// Indices of the components to be removed from this entity.
+    removed_components: BitSet<ComponentIdx>,
+    /// Indices of the components to be inserted into this entity.
+    inserted_components: BitSet<ComponentIdx>,
+    /// Pointers to the components to be inserted into this entity, sorted by
+    /// component index. Has the same length as `inserted_components`.
+    inserted_component_pointers: Vec<*mut u8>,
+    /// Drop functions used to drop components to be inserted into this entity,
+    /// for example when they're removed again before the move operation is
+    /// finally performed.
+    inserted_component_drop_fns: Vec<DropFn>,
 }
 
 impl Archetypes {
@@ -67,6 +181,7 @@ impl Archetypes {
         Self {
             archetypes: Slab::from_iter([(0, empty_arch)]),
             by_components,
+            planned_moves: HashMap::with_hasher(RandomState::new()),
         }
     }
 
@@ -100,6 +215,126 @@ impl Archetypes {
         components: &BitSet<ComponentIdx>,
     ) -> Option<ArchetypeIdx> {
         self.by_components.get(components).copied()
+    }
+
+    pub(crate) fn plan_insert(
+        &mut self,
+        entity_id: EntityId,
+        inserted_component_indices: &BitSet<ComponentIdx>,
+        inserted_component_pointers: &[*mut u8],
+        inserted_component_drop_fns: &[DropFn],
+    ) {
+        match self.planned_moves.entry(entity_id) {
+            Entry::Occupied(mut entry) => {
+                let planned_move = entry.get_mut();
+
+                let mut insertion_index = 0;
+                let mut old = Advance::new(planned_move.inserted_components.iter());
+                let mut new = CountingAdvance::new(inserted_component_indices.iter());
+                loop {
+                    enum State {
+                        Insert,
+                        Replace,
+                        Keep,
+                        Done,
+                    }
+
+                    let state = match (old.current(), new.current()) {
+                        (Some(&old_component_idx), Some(&new_component_idx)) => {
+                            match old_component_idx.cmp(&new_component_idx) {
+                                Ordering::Less => State::Keep,
+                                Ordering::Equal => State::Replace,
+                                Ordering::Greater => State::Insert,
+                            }
+                        }
+                        (Some(_), None) => State::Keep,
+                        (None, Some(_)) => State::Insert,
+                        (None, None) => State::Done,
+                    };
+
+                    /*
+                    old [counter=0]: 0 3 5
+                    new [counter=0]: 1 3 4
+                    (0), (3), (5)
+                    => state = WillNotFindMatchingNewForOld
+                    => keep, advance old
+
+                    old [counter=1]: 3 5
+                    new [counter=0]: 1 3 4
+                    (0), (3), (5)
+                    => state = WillNotFindMatchingOldForNew
+                    => insert, advance new
+
+                    old [counter=1]: 3 5
+                    new [counter=1]: 3 4
+                    (0), (1), (3*), (5)
+                    => state = Match
+                    => replace, advance both
+
+                    old [counter=2]: 5
+                    new [counter=2]: 4
+                    (0), (1), (3), (5)
+                    => state = WillNotFindMatchingOldForNew
+                    => insert, advance new
+
+                    old [counter=2]: 5
+                    new [counter=3]: -
+                    (0), (1), (3), (4), (5)
+                    => state = WillNotFindMatchingOldForNew
+                    => insert, advance new
+                     */
+
+                    match state {
+                        State::Keep => {
+                            insertion_index += 1;
+                            old.advance();
+                        }
+                        State::Insert => {
+                            let new_pointer = inserted_component_pointers[new.counter()];
+                            planned_move
+                                .inserted_component_pointers
+                                .insert(insertion_index, new_pointer);
+                            insertion_index += 1;
+                            new.advance();
+                        }
+                        State::Replace => {
+                            let new_pointer = inserted_component_pointers[new.counter()];
+                            let new_drop_fn = inserted_component_drop_fns[new.counter()];
+                            let old_pointer = mem::replace(
+                                &mut planned_move.inserted_component_pointers[insertion_index],
+                                new_pointer,
+                            );
+                            let old_drop_fn = mem::replace(
+                                &mut planned_move.inserted_component_drop_fns[insertion_index],
+                                new_drop_fn,
+                            );
+                            if let Some(drop_fn) = old_drop_fn {
+                                // TODO: Improve this: Store NonNulls in
+                                //  PlannedEntityMoveOperation, port the ptr
+                                //  module from the no-archetypes branch, or
+                                //  solve this another way.
+                                unsafe { drop_fn(NonNull::new_unchecked(old_pointer)) }
+                            }
+
+                            insertion_index += 1;
+                            old.advance();
+                            new.advance();
+                        }
+                        State::Done => {
+                            break;
+                        }
+                    }
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(PlannedEntityMoveOperation {
+                    removed_components: BitSet::new(),
+                    inserted_components: inserted_component_indices.clone(),
+                    inserted_component_pointers: inserted_component_pointers.to_vec(),
+                    inserted_component_drop_fns: inserted_component_drop_fns.to_vec(),
+                });
+            }
+        }
     }
 
     /// Spawns a new entity with the given ID and returns its location.
@@ -344,6 +579,7 @@ impl Archetypes {
             use OldComponentState::*;
             use ProcessState::*;
 
+            use crate::archetype::advance::CountingAdvance;
             use crate::component::ComponentIdx;
 
             /// Information and recommendations for action based on a comparison
@@ -387,37 +623,11 @@ impl Archetypes {
                 Done,
             }
 
-            /// Wrapper around an iterator. Has to be advanced using the
-            /// [`advance`] method, which will cache the iterator's next element
-            /// in `self.current` and increment `self.counter`.
-            ///
-            /// [`advance`]: Adapter::advance
-            struct Adapter<I: Iterator> {
-                counter: usize,
-                current: Option<I::Item>,
-                iter: I,
-            }
-
-            impl<I: Iterator> Adapter<I> {
-                fn new(mut iter: I) -> Self {
-                    Self {
-                        counter: 0,
-                        current: iter.next(),
-                        iter,
-                    }
-                }
-
-                fn advance(&mut self) {
-                    self.counter += 1;
-                    self.current = self.iter.next();
-                }
-            }
-
             #[allow(clippy::struct_field_names)]
             pub(super) struct Process<I: Iterator<Item = ComponentIdx>> {
-                src_component_indices: Adapter<I>,
-                dst_component_indices: Adapter<I>,
-                new_component_indices: Adapter<I>,
+                src_component_indices: CountingAdvance<I>,
+                dst_component_indices: CountingAdvance<I>,
+                new_component_indices: CountingAdvance<I>,
             }
 
             impl<I: Iterator<Item = ComponentIdx>> Process<I> {
@@ -428,17 +638,17 @@ impl Archetypes {
                     new_component_indices: I,
                 ) -> Self {
                     Self {
-                        src_component_indices: Adapter::new(src_component_indices),
-                        dst_component_indices: Adapter::new(dst_component_indices),
-                        new_component_indices: Adapter::new(new_component_indices),
+                        src_component_indices: CountingAdvance::new(src_component_indices),
+                        dst_component_indices: CountingAdvance::new(dst_component_indices),
+                        new_component_indices: CountingAdvance::new(new_component_indices),
                     }
                 }
 
                 #[inline]
                 pub(super) fn state(&self) -> ProcessState {
-                    let src_component_index = self.src_component_indices.current;
-                    let dst_component_index = self.dst_component_indices.current;
-                    let new_component_index = self.new_component_indices.current;
+                    let src_component_index = self.src_component_indices.current();
+                    let dst_component_index = self.dst_component_indices.current();
+                    let new_component_index = self.new_component_indices.current();
 
                     match (
                         src_component_index,
@@ -547,17 +757,17 @@ impl Archetypes {
 
                 #[inline]
                 pub(super) fn src_idx(&self) -> usize {
-                    self.src_component_indices.counter
+                    self.src_component_indices.counter()
                 }
 
                 #[inline]
                 pub(super) fn dst_idx(&self) -> usize {
-                    self.dst_component_indices.counter
+                    self.dst_component_indices.counter()
                 }
 
                 #[inline]
                 pub(super) fn new_idx(&self) -> usize {
-                    self.new_component_indices.counter
+                    self.new_component_indices.counter()
                 }
             }
         }
@@ -893,8 +1103,7 @@ impl Archetype {
         component_access: &ComponentAccess,
     ) {
         // Tell the fetcher about this archetype.
-        if component_access.matches_archetype(|idx| self.column_of(idx).is_some())
-        {
+        if component_access.matches_archetype(|idx| self.column_of(idx).is_some()) {
             // Don't call `refresh_archetype` if this archetype is empty.
             if self.len() > 0 {
                 fetcher_state.refresh_archetype(self);
