@@ -176,16 +176,16 @@ impl Archetypes {
             Entry::Occupied(mut entry) => {
                 let planned_move = entry.get_mut();
 
-                let insertion_index = planned_move.inserted_components.count_less(component_idx);
+                let index = planned_move.inserted_components.count_less(component_idx);
                 let has_to_replace_old = planned_move.inserted_components.insert(component_idx);
 
                 if has_to_replace_old {
                     let old_ptr = mem::replace(
-                        &mut planned_move.inserted_component_pointers[insertion_index],
+                        &mut planned_move.inserted_component_pointers[index],
                         component_ptr,
                     );
                     let old_drop_fn = mem::replace(
-                        &mut planned_move.inserted_component_drop_fns[insertion_index],
+                        &mut planned_move.inserted_component_drop_fns[index],
                         component_drop_fn,
                     );
                     if let Some(drop_fn) = old_drop_fn {
@@ -194,10 +194,10 @@ impl Archetypes {
                 } else {
                     planned_move
                         .inserted_component_pointers
-                        .insert(insertion_index, component_ptr);
+                        .insert(index, component_ptr);
                     planned_move
                         .inserted_component_drop_fns
-                        .insert(insertion_index, component_drop_fn);
+                        .insert(index, component_drop_fn);
                 }
             }
             Entry::Vacant(entry) => {
@@ -206,6 +206,39 @@ impl Archetypes {
                     inserted_components: BitSet::from_iter(iter::once(component_idx)),
                     inserted_component_pointers: vec![component_ptr],
                     inserted_component_drop_fns: vec![component_drop_fn],
+                });
+            }
+        }
+    }
+
+    pub(crate) fn plan_remove(
+        &mut self,
+        entity_id: EntityId,
+        component_idx: ComponentIdx,
+    ) {
+        match self.planned_moves.entry(entity_id) {
+            Entry::Occupied(mut entry) => {
+                let planned_move = entry.get_mut();
+
+                let has_to_remove_inserted = planned_move.inserted_components.remove(component_idx);
+
+                if has_to_remove_inserted {
+                    let index = planned_move.inserted_components.count_less(component_idx);
+                    let old_ptr = planned_move.inserted_component_pointers.swap_remove(index);
+                    let old_drop_fn = planned_move.inserted_component_drop_fns.swap_remove(index);
+                    if let Some(drop_fn) = old_drop_fn {
+                        unsafe { drop_fn(old_ptr) }
+                    }
+                } else {
+                    planned_move.removed_components.insert(component_idx);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(PlannedEntityMoveOperation {
+                    removed_components: BitSet::from_iter(iter::once(component_idx)),
+                    inserted_components: BitSet::new(),
+                    inserted_component_pointers: Vec::new(),
+                    inserted_component_drop_fns: Vec::new(),
                 });
             }
         }
