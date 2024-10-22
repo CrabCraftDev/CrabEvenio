@@ -3,11 +3,12 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use core::cmp::Ordering;
+use core::hash::{Hash, Hasher};
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::ops::{BitOr, BitOrAssign, BitXor, BitXorAssign};
 use core::{any, fmt};
-use core::hash::{Hash, Hasher};
+
 use crate::sparse::SparseIndex;
 
 /// A set data structure backed by a vector of bits.
@@ -148,7 +149,8 @@ impl<T: SparseIndex> BitSet<T> {
 
         let (block_index, bit_index) = div_rem(idx, BITS);
 
-        let before_block = self.blocks
+        let before_block = self
+            .blocks
             .iter()
             .copied()
             .take(block_index)
@@ -162,14 +164,14 @@ impl<T: SparseIndex> BitSet<T> {
         let in_block = (block & mask).count_ones();
         (before_block + in_block) as usize
     }
-    
+
     /// Removes all elements of `other` from `self`.
     pub(crate) fn remove_all(&mut self, other: &Self) {
         for (a, b) in self.blocks.iter_mut().zip(other.blocks.iter()) {
             *a &= !*b;
         }
     }
-    
+
     /// Returns an iterator over the element in the set in ascending order.
     pub(crate) fn iter(&self) -> Iter<T> {
         Iter {

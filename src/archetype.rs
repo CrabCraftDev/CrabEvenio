@@ -211,11 +211,7 @@ impl Archetypes {
         }
     }
 
-    pub(crate) fn plan_remove(
-        &mut self,
-        entity_id: EntityId,
-        component_idx: ComponentIdx,
-    ) {
+    pub(crate) fn plan_remove(&mut self, entity_id: EntityId, component_idx: ComponentIdx) {
         match self.planned_moves.entry(entity_id) {
             Entry::Occupied(mut entry) => {
                 let planned_move = entry.get_mut();

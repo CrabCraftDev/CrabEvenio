@@ -1037,7 +1037,10 @@ fn initialize_component_set<C: ComponentSet>(
 
     // Apply the permutation, sorting the indices.
     let component_indices = permutation.apply_collect(unsorted_component_indices);
-    debug_assert!(component_indices.windows(2).all(|w| w[0] <= w[1]), "Components should be ordered");
+    debug_assert!(
+        component_indices.windows(2).all(|w| w[0] <= w[1]),
+        "Components should be ordered"
+    );
 
     // Check if there are any duplicates.
     if sorted_slice_contains_duplicates(&component_indices) {

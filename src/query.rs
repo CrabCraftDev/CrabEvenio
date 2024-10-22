@@ -59,8 +59,8 @@ use crate::world::World;
 ///
 /// # Safety
 ///
-/// Implementors must ensure that [`Query::get_access`] correctly registers the data
-/// accessed in [`Query::get`].
+/// Implementors must ensure that [`Query::get_access`] correctly registers the
+/// data accessed in [`Query::get`].
 pub unsafe trait Query {
     /// The item returned by this query. This must be the same type as `Self`,
     /// but with a modified lifetime.
@@ -134,7 +134,10 @@ unsafe impl<C: Component> Query for &'_ C {
     }
 
     fn get_new_state(world: &World) -> Option<Self::State> {
-        world.components().get_by_type_id(TypeId::of::<C>()).map(|info| info.id().index())
+        world
+            .components()
+            .get_by_type_id(TypeId::of::<C>())
+            .map(|info| info.id().index())
     }
 
     fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {
@@ -169,7 +172,10 @@ unsafe impl<C: Component<Mutability = Mutable>> Query for &'_ mut C {
     }
 
     fn get_new_state(world: &World) -> Option<Self::State> {
-        world.components().get_by_type_id(TypeId::of::<C>()).map(|info| info.id().index())
+        world
+            .components()
+            .get_by_type_id(TypeId::of::<C>())
+            .map(|info| info.id().index())
     }
 
     fn new_arch_state(arch: &Archetype, state: &Self::State) -> Option<Self::ArchState> {

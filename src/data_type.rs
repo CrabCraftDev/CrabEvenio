@@ -3,6 +3,7 @@
 use core::alloc::Layout;
 use core::any::{type_name, TypeId};
 use core::ptr::NonNull;
+
 use crate::drop::{drop_fn_of, DropFn};
 
 /// A type whose properties are stored and processed dynamically at runtime.
@@ -42,7 +43,7 @@ impl DataType {
         // cannot be null.
         unsafe { NonNull::new_unchecked(self.layout.align() as *mut u8) }
     }
-    
+
     pub(crate) fn layout_and_drop_fn_equal(a: DataType, b: DataType) -> bool {
         a.layout == b.layout && a.drop_fn == b.drop_fn
     }

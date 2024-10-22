@@ -1,6 +1,7 @@
 //! For profiling.
 
 use core::hint::black_box;
+
 use evenio::prelude::*;
 
 fn main() {
@@ -25,7 +26,7 @@ fn main() {
 
     let mut world = World::new();
 
-    for _ in 0..1<<24 {
+    for _ in 0..1 << 24 {
         spawn_with_components!(
             world,
             C0 C1 C2 C3 C4 C5 C6 C7 C8 C9,
@@ -35,5 +36,5 @@ fn main() {
         );
 
         black_box(&mut world);
-    };
+    }
 }

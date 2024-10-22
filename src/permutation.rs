@@ -1,6 +1,7 @@
 //! [`Permutation`] struct for storing reorderings.
 
 use core::mem::MaybeUninit;
+
 use crate::boxed_slice;
 
 /// A permutation used for reordering the elements of a slice.

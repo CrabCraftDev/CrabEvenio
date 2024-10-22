@@ -1,6 +1,7 @@
-use alloc::alloc::{alloc, realloc, dealloc, handle_alloc_error};
+use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use core::alloc::Layout;
 use core::ptr::{copy_nonoverlapping, NonNull};
+
 use crate::data_type::DataType;
 #[derive(Debug)]
 pub(crate) struct DataStore {
@@ -248,7 +249,7 @@ impl DataStore {
             from.element_type,
             to.element_type,
         ));
-        
+
         copy_nonoverlapping(
             from.get_unchecked(from_index),
             to.get_unchecked_mut(to_index),
