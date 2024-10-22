@@ -49,8 +49,7 @@ pub struct World {
     archetypes: Archetypes,
     global_events: GlobalEvents,
     targeted_events: TargetedEvents,
-    event_queue: Vec<EventQueueItem>,
-    // Used in flush_event_queue to avoid frequent allocations.
+    // Used in send_inner to avoid frequent allocations.
     component_pointer_buffer: Vec<MaybeUninit<*const u8>>,
     bump: Bump,
     /// So the world doesn't accidentally implement `Send` or `Sync`.
@@ -76,7 +75,6 @@ impl World {
             archetypes: Archetypes::new(),
             global_events: GlobalEvents::new(),
             targeted_events: TargetedEvents::new(),
-            event_queue: vec![],
             component_pointer_buffer: vec![],
             bump: Bump::new(),
             _marker: PhantomData,
@@ -117,12 +115,290 @@ impl World {
     pub fn send<E: GlobalEvent>(&mut self, event: E) {
         let idx = self.add_global_event::<E>().index();
 
-        self.event_queue.push(EventQueueItem {
+        self.send_inner(EventQueueItem {
             meta: EventMeta::Global { idx },
             event: NonNull::from(self.bump.alloc(event)).cast(),
         });
+    }
 
-        self.flush_event_queue();
+    pub fn send_inner(&mut self, item: EventQueueItem) {
+        struct EventDropper<'a> {
+            event: NonNull<u8>,
+            drop: DropFn,
+            ownership_flag: bool,
+            world: &'a mut World,
+        }
+
+        impl<'a> EventDropper<'a> {
+            fn new(event: NonNull<u8>, drop: DropFn, world: &'a mut World) -> Self {
+                Self {
+                    event,
+                    drop,
+                    ownership_flag: false,
+                    world,
+                }
+            }
+
+            /// Extracts the event pointer and drop fn without running
+            /// the destructor.
+            #[inline]
+            fn unpack(self) -> (NonNull<u8>, DropFn) {
+                let event = self.event;
+                let drop = self.drop;
+                mem::forget(self);
+
+                (event, drop)
+            }
+
+            /// Drops the held event.
+            #[inline]
+            unsafe fn drop_event(self) {
+                if let (event, Some(drop)) = self.unpack() {
+                    drop(event);
+                }
+            }
+        }
+
+        impl Drop for EventDropper<'_> {
+            #[cold]
+            fn drop(&mut self) {
+                // In case `Handler::run` unwinds, we need to drop the event we're holding on
+                // the stack as well as the events still the in the event queue.
+
+                #[cfg(feature = "std")]
+                debug_assert!(std::thread::panicking());
+
+                // Drop the held event.
+                if !self.ownership_flag {
+                    if let Some(drop) = self.drop {
+                        unsafe { drop(self.event) };
+                    }
+                }
+            }
+        }
+
+        let (mut ctx, event_kind, handlers, target_location) = match item.meta {
+            EventMeta::Global { idx } => {
+                let info = unsafe { self.global_events.get_by_index(idx).unwrap_unchecked() };
+                let kind: *const _ = info.kind();
+                let handlers: *const [_] =
+                    unsafe { self.handlers.get_global_list(idx).unwrap_unchecked() }.slice();
+                let ctx = EventDropper::new(item.event, info.drop(), self);
+
+                let location = EntityLocation::NULL;
+
+                (ctx, kind, handlers, location)
+            }
+            EventMeta::Targeted { idx, target } => {
+                let info = unsafe { self.targeted_events.get_by_index(idx).unwrap_unchecked() };
+                let kind: *const _ = info.kind();
+                let ctx = EventDropper::new(item.event, info.drop(), self);
+
+                let Some(location) = ctx.world.entities.get(target) else {
+                    // Entity doesn't exist. Skip the event.
+                    unsafe { ctx.drop_event() };
+                    return;
+                };
+
+                let arch = unsafe {
+                    ctx.world
+                        .archetypes
+                        .get(location.archetype)
+                        .unwrap_unchecked()
+                };
+
+                static EMPTY: HandlerList = HandlerList::new();
+
+                let handlers: *const [_] = arch.handler_list_for(idx).unwrap_or(&EMPTY).slice();
+
+                (ctx, kind, handlers, location)
+            }
+        };
+
+        for mut info_ptr in unsafe { (*handlers).iter().copied() } {
+            let info = unsafe { info_ptr.as_info_mut() };
+
+            let handler: *mut dyn Handler = info.handler_mut();
+
+            let event_ptr = EventPtr::new(ctx.event, NonNull::from(&mut ctx.ownership_flag));
+
+            let world_cell = ctx.world.unsafe_cell_mut();
+
+            unsafe { (*handler).run(info, event_ptr, target_location, world_cell) };
+
+            // Did the handler take ownership of the event?
+            if ctx.ownership_flag {
+                // Don't drop event since we don't own it anymore.
+                ctx.unpack();
+
+                return;
+            }
+        }
+
+        match unsafe { &*event_kind } {
+            EventKind::Normal => {
+                // Ordinary event. Run drop fn.
+                unsafe { ctx.drop_event() };
+            }
+            EventKind::Insert(InsertedComponentsInfo {
+                component_indices,
+                permutation,
+                get_components,
+            }) => {
+                debug_assert_ne!(target_location, EntityLocation::NULL);
+
+                let src_arch = ctx
+                    .world
+                    .archetypes()
+                    .get(target_location.archetype)
+                    .unwrap();
+                let dst_component_indices =
+                    src_arch.component_indices().clone() | component_indices;
+                let dst = unsafe {
+                    ctx.world.archetypes.create_archetype(
+                        dst_component_indices,
+                        &mut ctx.world.components,
+                        &mut ctx.world.handlers,
+                    )
+                };
+
+                // The Insert event is repr(transparent), and its only field
+                // is the set of inserted components.
+                let components_ptr: *const u8 = ctx.event.as_ptr();
+
+                // Resize the component pointer buffer.
+                let buffer = &mut ctx.world.component_pointer_buffer;
+                buffer.reserve(permutation.len().saturating_sub(buffer.len()));
+                // SAFETY: We just ensured that the buffer's capacity is
+                // sufficient. Elements being uninitialized is not an issue,
+                // because they are MaybeUninit values anyway.
+                unsafe {
+                    buffer.set_len(permutation.len());
+                }
+
+                // Create a `ComponentPointerConsumer` with the event's
+                // permutation to sort the collected component pointers.
+                let mut consumer = ComponentPointerConsumer::new(permutation, buffer);
+
+                // Collect the component pointers.
+                unsafe { get_components(components_ptr, &mut consumer) };
+
+                // Unpack the consumer to get the pointers.
+                let component_pointers = unsafe { consumer.get_pointers_unchecked() };
+
+                // Finally, move the entity to the destination archetype,
+                // passing the component pointers.
+                unsafe {
+                    ctx.world.archetypes.move_entity(
+                        target_location,
+                        dst,
+                        component_indices,
+                        component_pointers,
+                        &mut ctx.world.entities,
+                    )
+                };
+
+                // Inserted components are owned by the archetype now. We
+                // wait to unpack in case one of the above functions panics.
+                let _ = ctx.unpack();
+            }
+            EventKind::Remove(RemovedComponentsInfo { component_indices }) => {
+                // `Remove` doesn't need drop.
+                let _ = ctx.unpack();
+
+                let src_arch = self.archetypes().get(target_location.archetype).unwrap();
+                let mut dst_component_indices = src_arch.component_indices().clone();
+                dst_component_indices.remove_all(component_indices);
+                let dst = unsafe {
+                    self.archetypes.create_archetype(
+                        dst_component_indices,
+                        &mut self.components,
+                        &mut self.handlers,
+                    )
+                };
+
+                unsafe {
+                    self.archetypes.move_entity(
+                        target_location,
+                        dst,
+                        &BitSet::<ComponentIdx>::new(),
+                        &[],
+                        &mut self.entities,
+                    )
+                };
+            }
+            EventKind::Spawn(SpawnInfo {
+                components_field_offset,
+                inserted_components:
+                    InsertedComponentsInfo {
+                        component_indices,
+                        permutation,
+                        get_components,
+                    },
+            }) => {
+                let arch = ctx
+                    .world
+                    .archetypes
+                    .get_by_components(component_indices)
+                    .unwrap_or_else(|| unsafe {
+                        ctx.world.archetypes.create_archetype(
+                            component_indices.clone(),
+                            &mut ctx.world.components,
+                            &mut ctx.world.handlers,
+                        )
+                    });
+
+                // The offset of the `components` field of the event is
+                // stored in the event kind.
+                let components_ptr: *const u8 =
+                    unsafe { ctx.event.as_ptr().byte_add(*components_field_offset) };
+
+                // Resize the component pointer buffer.
+                let buffer = &mut ctx.world.component_pointer_buffer;
+                buffer.reserve(permutation.len().saturating_sub(buffer.len()));
+                // SAFETY: We just ensured that the buffer's capacity is
+                // sufficient. Elements being uninitialized is not an issue,
+                // because they are MaybeUninit values anyway.
+                unsafe {
+                    buffer.set_len(permutation.len());
+                }
+
+                // Create a `ComponentPointerConsumer` with the event's
+                // permutation to sort the collected component pointers.
+                let mut consumer = ComponentPointerConsumer::new(permutation, buffer);
+
+                // Collect the component pointers.
+                unsafe { get_components(components_ptr, &mut consumer) };
+
+                // Unpack the consumer to get the pointers.
+                let component_pointers = unsafe { consumer.get_pointers_unchecked() };
+
+                // Spawn the next entity from the reserved entity queue.
+                ctx.world
+                    .reserved_entities
+                    .spawn_one(&mut ctx.world.entities, |id| unsafe {
+                        ctx.world.archetypes.spawn(id, arch, component_pointers)
+                    });
+
+                // Inserted components are owned by the archetype now. We
+                // wait to unpack in case one of the above functions panics.
+                let _ = ctx.unpack();
+            }
+            EventKind::Despawn => {
+                // `Despawn` doesn't need drop.
+                let _ = ctx.unpack();
+
+                unsafe {
+                    self.archetypes
+                        .remove_entity(target_location, &mut self.entities)
+                };
+
+                // Reset next key iter.
+                self.reserved_entities.refresh(&self.entities);
+            }
+        }
+
+        self.bump.reset();
     }
 
     /// Broadcast a targeted event to all handlers in this world.
@@ -156,12 +432,10 @@ impl World {
     pub fn send_to<E: TargetedEvent>(&mut self, target: EntityId, event: E) {
         let idx = self.add_targeted_event::<E>().index();
 
-        self.event_queue.push(EventQueueItem {
+        self.send_inner(EventQueueItem {
             meta: EventMeta::Targeted { target, idx },
             event: NonNull::from(self.bump.alloc(event)).cast(),
         });
-
-        self.flush_event_queue();
     }
 
     /// Creates a new entity, returns its [`EntityId`], and sends the [`Spawn`]
@@ -748,11 +1022,13 @@ impl World {
 
         let despawn_idx = self.add_targeted_event::<Despawn>().index();
 
+        let mut events_to_send = Vec::new();
+
         // Attempt to despawn all entities that still have this component.
         for arch in self.archetypes.iter() {
             if arch.column_of(component.index()).is_some() {
                 for &entity_id in arch.entity_ids() {
-                    self.event_queue.push(EventQueueItem {
+                    events_to_send.push(EventQueueItem {
                         meta: EventMeta::Targeted {
                             idx: despawn_idx,
                             target: entity_id,
@@ -763,7 +1039,9 @@ impl World {
             }
         }
 
-        self.flush_event_queue();
+        for event in events_to_send {
+            self.send_inner(event);
+        }
 
         // Remove all handlers that reference this component.
         let mut handlers_to_remove = vec![];
@@ -1093,8 +1371,6 @@ impl World {
     /// assert!(!world.global_events().contains(id));
     /// ```
     pub fn remove_global_event(&mut self, event: GlobalEventId) -> Option<GlobalEventInfo> {
-        assert!(self.event_queue.is_empty());
-
         if !self.global_events.contains(event) {
             return None;
         }
@@ -1145,8 +1421,6 @@ impl World {
     /// assert!(!world.targeted_events().contains(id));
     /// ```
     pub fn remove_targeted_event(&mut self, event: TargetedEventId) -> Option<TargetedEventInfo> {
-        assert!(self.event_queue.is_empty());
-
         if !self.targeted_events.contains(event) {
             return None;
         }
@@ -1240,336 +1514,6 @@ impl World {
         &self.targeted_events
     }
 
-    /// Send all queued events to handlers. The event queue will be empty after
-    /// this call.
-    fn flush_event_queue(&mut self) {
-        'next_event: while let Some(item) = self.event_queue.pop() {
-            struct EventDropper<'a> {
-                event: NonNull<u8>,
-                drop: DropFn,
-                ownership_flag: bool,
-                world: &'a mut World,
-            }
-
-            impl<'a> EventDropper<'a> {
-                fn new(event: NonNull<u8>, drop: DropFn, world: &'a mut World) -> Self {
-                    Self {
-                        event,
-                        drop,
-                        ownership_flag: false,
-                        world,
-                    }
-                }
-
-                /// Extracts the event pointer and drop fn without running
-                /// the destructor.
-                #[inline]
-                fn unpack(self) -> (NonNull<u8>, DropFn) {
-                    let event = self.event;
-                    let drop = self.drop;
-                    mem::forget(self);
-
-                    (event, drop)
-                }
-
-                /// Drops the held event.
-                #[inline]
-                unsafe fn drop_event(self) {
-                    if let (event, Some(drop)) = self.unpack() {
-                        drop(event);
-                    }
-                }
-            }
-
-            impl Drop for EventDropper<'_> {
-                #[cold]
-                fn drop(&mut self) {
-                    // In case `Handler::run` unwinds, we need to drop the event we're holding on
-                    // the stack as well as the events still the in the event queue.
-
-                    #[cfg(feature = "std")]
-                    debug_assert!(std::thread::panicking());
-
-                    // Drop the held event.
-                    if !self.ownership_flag {
-                        if let Some(drop) = self.drop {
-                            unsafe { drop(self.event) };
-                        }
-                    }
-
-                    // Drop all events remaining in the event queue.
-                    // This must be done here instead of the World's destructor because events
-                    // could contain borrowed data.
-                    for item in &self.world.event_queue {
-                        let drop = match item.meta {
-                            EventMeta::Global { idx } => unsafe {
-                                self.world
-                                    .global_events
-                                    .get_by_index(idx)
-                                    .unwrap_unchecked()
-                                    .drop()
-                            },
-                            EventMeta::Targeted { idx, .. } => unsafe {
-                                self.world
-                                    .targeted_events
-                                    .get_by_index(idx)
-                                    .unwrap_unchecked()
-                                    .drop()
-                            },
-                        };
-
-                        if let Some(drop) = drop {
-                            unsafe { drop(item.event) };
-                        }
-                    }
-
-                    self.world.event_queue.clear();
-                }
-            }
-
-            let (mut ctx, event_kind, handlers, target_location) = match item.meta {
-                EventMeta::Global { idx } => {
-                    let info = unsafe { self.global_events.get_by_index(idx).unwrap_unchecked() };
-                    let kind: *const _ = info.kind();
-                    let handlers: *const [_] =
-                        unsafe { self.handlers.get_global_list(idx).unwrap_unchecked() }.slice();
-                    let ctx = EventDropper::new(item.event, info.drop(), self);
-
-                    let location = EntityLocation::NULL;
-
-                    (ctx, kind, handlers, location)
-                }
-                EventMeta::Targeted { idx, target } => {
-                    let info = unsafe { self.targeted_events.get_by_index(idx).unwrap_unchecked() };
-                    let kind: *const _ = info.kind();
-                    let ctx = EventDropper::new(item.event, info.drop(), self);
-
-                    let Some(location) = ctx.world.entities.get(target) else {
-                        // Entity doesn't exist. Skip the event.
-                        unsafe { ctx.drop_event() };
-                        continue;
-                    };
-
-                    let arch = unsafe {
-                        ctx.world
-                            .archetypes
-                            .get(location.archetype)
-                            .unwrap_unchecked()
-                    };
-
-                    static EMPTY: HandlerList = HandlerList::new();
-
-                    let handlers: *const [_] = arch.handler_list_for(idx).unwrap_or(&EMPTY).slice();
-
-                    (ctx, kind, handlers, location)
-                }
-            };
-
-            let events_before = ctx.world.event_queue.len();
-
-            for mut info_ptr in unsafe { (*handlers).iter().copied() } {
-                let info = unsafe { info_ptr.as_info_mut() };
-
-                let handler: *mut dyn Handler = info.handler_mut();
-
-                let event_ptr = EventPtr::new(ctx.event, NonNull::from(&mut ctx.ownership_flag));
-
-                let world_cell = ctx.world.unsafe_cell_mut();
-
-                unsafe { (*handler).run(info, event_ptr, target_location, world_cell) };
-
-                // Did the handler take ownership of the event?
-                if ctx.ownership_flag {
-                    // Don't drop event since we don't own it anymore.
-                    ctx.unpack();
-
-                    // Reverse pushed events so they're handled in FIFO order.
-                    unsafe {
-                        self.event_queue
-                            .get_unchecked_mut(events_before..)
-                            .reverse()
-                    };
-
-                    continue 'next_event;
-                }
-            }
-
-            // Reverse pushed events so they're handled in FIFO order.
-            unsafe {
-                ctx.world
-                    .event_queue
-                    .get_unchecked_mut(events_before..)
-                    .reverse()
-            };
-
-            match unsafe { &*event_kind } {
-                EventKind::Normal => {
-                    // Ordinary event. Run drop fn.
-                    unsafe { ctx.drop_event() };
-                }
-                EventKind::Insert(InsertedComponentsInfo {
-                    component_indices,
-                    permutation,
-                    get_components,
-                }) => {
-                    debug_assert_ne!(target_location, EntityLocation::NULL);
-
-                    let src_arch = ctx
-                        .world
-                        .archetypes()
-                        .get(target_location.archetype)
-                        .unwrap();
-                    let dst_component_indices =
-                        src_arch.component_indices().clone() | component_indices;
-                    let dst = unsafe {
-                        ctx.world.archetypes.create_archetype(
-                            dst_component_indices,
-                            &mut ctx.world.components,
-                            &mut ctx.world.handlers,
-                        )
-                    };
-
-                    // The Insert event is repr(transparent), and its only field
-                    // is the set of inserted components.
-                    let components_ptr: *const u8 = ctx.event.as_ptr();
-
-                    // Resize the component pointer buffer.
-                    let buffer = &mut ctx.world.component_pointer_buffer;
-                    buffer.reserve(permutation.len().saturating_sub(buffer.len()));
-                    // SAFETY: We just ensured that the buffer's capacity is
-                    // sufficient. Elements being uninitialized is not an issue,
-                    // because they are MaybeUninit values anyway.
-                    unsafe {
-                        buffer.set_len(permutation.len());
-                    }
-
-                    // Create a `ComponentPointerConsumer` with the event's
-                    // permutation to sort the collected component pointers.
-                    let mut consumer = ComponentPointerConsumer::new(permutation, buffer);
-
-                    // Collect the component pointers.
-                    unsafe { get_components(components_ptr, &mut consumer) };
-
-                    // Unpack the consumer to get the pointers.
-                    let component_pointers = unsafe { consumer.get_pointers_unchecked() };
-
-                    // Finally, move the entity to the destination archetype,
-                    // passing the component pointers.
-                    unsafe {
-                        ctx.world.archetypes.move_entity(
-                            target_location,
-                            dst,
-                            component_indices,
-                            component_pointers,
-                            &mut ctx.world.entities,
-                        )
-                    };
-
-                    // Inserted components are owned by the archetype now. We
-                    // wait to unpack in case one of the above functions panics.
-                    let _ = ctx.unpack();
-                }
-                EventKind::Remove(RemovedComponentsInfo { component_indices }) => {
-                    // `Remove` doesn't need drop.
-                    let _ = ctx.unpack();
-
-                    let src_arch = self.archetypes().get(target_location.archetype).unwrap();
-                    let mut dst_component_indices = src_arch.component_indices().clone();
-                    dst_component_indices.remove_all(component_indices);
-                    let dst = unsafe {
-                        self.archetypes.create_archetype(
-                            dst_component_indices,
-                            &mut self.components,
-                            &mut self.handlers,
-                        )
-                    };
-
-                    unsafe {
-                        self.archetypes.move_entity(
-                            target_location,
-                            dst,
-                            &BitSet::<ComponentIdx>::new(),
-                            &[],
-                            &mut self.entities,
-                        )
-                    };
-                }
-                EventKind::Spawn(SpawnInfo {
-                    components_field_offset,
-                    inserted_components:
-                        InsertedComponentsInfo {
-                            component_indices,
-                            permutation,
-                            get_components,
-                        },
-                }) => {
-                    let arch = ctx
-                        .world
-                        .archetypes
-                        .get_by_components(component_indices)
-                        .unwrap_or_else(|| unsafe {
-                            ctx.world.archetypes.create_archetype(
-                                component_indices.clone(),
-                                &mut ctx.world.components,
-                                &mut ctx.world.handlers,
-                            )
-                        });
-
-                    // The offset of the `components` field of the event is
-                    // stored in the event kind.
-                    let components_ptr: *const u8 =
-                        unsafe { ctx.event.as_ptr().byte_add(*components_field_offset) };
-
-                    // Resize the component pointer buffer.
-                    let buffer = &mut ctx.world.component_pointer_buffer;
-                    buffer.reserve(permutation.len().saturating_sub(buffer.len()));
-                    // SAFETY: We just ensured that the buffer's capacity is
-                    // sufficient. Elements being uninitialized is not an issue,
-                    // because they are MaybeUninit values anyway.
-                    unsafe {
-                        buffer.set_len(permutation.len());
-                    }
-
-                    // Create a `ComponentPointerConsumer` with the event's
-                    // permutation to sort the collected component pointers.
-                    let mut consumer = ComponentPointerConsumer::new(permutation, buffer);
-
-                    // Collect the component pointers.
-                    unsafe { get_components(components_ptr, &mut consumer) };
-
-                    // Unpack the consumer to get the pointers.
-                    let component_pointers = unsafe { consumer.get_pointers_unchecked() };
-
-                    // Spawn the next entity from the reserved entity queue.
-                    ctx.world
-                        .reserved_entities
-                        .spawn_one(&mut ctx.world.entities, |id| unsafe {
-                            ctx.world.archetypes.spawn(id, arch, component_pointers)
-                        });
-
-                    // Inserted components are owned by the archetype now. We
-                    // wait to unpack in case one of the above functions panics.
-                    let _ = ctx.unpack();
-                }
-                EventKind::Despawn => {
-                    // `Despawn` doesn't need drop.
-                    let _ = ctx.unpack();
-
-                    unsafe {
-                        self.archetypes
-                            .remove_entity(target_location, &mut self.entities)
-                    };
-
-                    // Reset next key iter.
-                    self.reserved_entities.refresh(&self.entities);
-                }
-            }
-        }
-
-        self.bump.reset();
-        debug_assert!(self.event_queue.is_empty());
-    }
-
     /// Returns a new [`UnsafeWorldCell`] with permission to _read_ all data in
     /// this world.
     pub fn unsafe_cell(&self) -> UnsafeWorldCell {
@@ -1629,9 +1573,7 @@ impl<'a> UnsafeWorldCell<'a> {
     /// - Event index must be correct for the given event.
     #[inline]
     pub unsafe fn queue_global(self, event: NonNull<u8>, idx: GlobalEventIdx) {
-        let event_queue = &mut (*self.world.as_ptr()).event_queue;
-
-        event_queue.push(EventQueueItem {
+        (*self.world.as_ptr()).send_inner(EventQueueItem {
             meta: EventMeta::Global { idx },
             event,
         });
@@ -1651,9 +1593,7 @@ impl<'a> UnsafeWorldCell<'a> {
         event: NonNull<u8>,
         idx: TargetedEventIdx,
     ) {
-        let event_queue = &mut (*self.world.as_ptr()).event_queue;
-
-        event_queue.push(EventQueueItem {
+        (*self.world.as_ptr()).send_inner(EventQueueItem {
             meta: EventMeta::Targeted { idx, target },
             event,
         });
