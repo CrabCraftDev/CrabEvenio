@@ -1,4 +1,8 @@
-# Evenio
+# Crab Evenio
+
+> [!NOTE]  
+> This is a fork of [AsterixxxGallier's fork](https://github.com/AsterixxxGallier) of [rj00a's original library](https://github.com/rj00a/evenio).<br/>
+> It includes performance improvements, new features, and more.
 
 `evenio` is an archetype-based [Entity Component System][ECS] framework for building event-driven programs. 
 It aims to have a small but maximally expressive set of features that are easy and efficient to use.
