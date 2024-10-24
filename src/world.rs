@@ -115,13 +115,60 @@ impl World {
     pub fn send<E: GlobalEvent>(&mut self, event: E) {
         let idx = self.add_global_event::<E>().index();
 
-        self.send_inner(EventQueueItem {
+        let _ = self.send_inner(EventQueueItem {
             meta: EventMeta::Global { idx },
             event: NonNull::from(self.bump.alloc(event)).cast(),
         });
     }
 
-    pub fn send_inner(&mut self, item: EventQueueItem) {
+    /// Broadcasts a global event to all handlers in this world and returns the
+    /// event if it was not handled.
+    ///
+    /// This function sends the given global event to all handlers that are
+    /// registered to listen for this event. If the event is not handled by
+    /// any handler, it is returned.
+    ///
+    /// Any events sent by handlers will also be broadcast. This process
+    /// continues recursively until all events have finished broadcasting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use evenio::prelude::*;
+    ///
+    /// #[derive(GlobalEvent, Debug, PartialEq)]
+    /// struct MyEvent(i32);
+    ///
+    /// fn my_handler(r: Receiver<MyEvent>) {
+    ///     println!("got event: {}", r.event.0);
+    /// }
+    ///
+    /// let mut world = World::new();
+    ///
+    /// world.add_handler(my_handler);
+    ///
+    /// let response = world.send_with_response(MyEvent(123));
+    ///
+    /// assert_eq!(response, Some(MyEvent(123)));
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// - `Some(E)` - final, modified event by all handlers
+    /// - `None` if the event was consumed by at least one handler.
+    pub fn send_with_response<E: GlobalEvent>(&mut self, event: E) -> Option<E> {
+        let idx = self.add_global_event::<E>().index();
+
+        let event_ptr = self.send_inner(EventQueueItem {
+            meta: EventMeta::Global { idx },
+            event: NonNull::from(self.bump.alloc(event)).cast(),
+        })?;
+
+        Some(unsafe { core::ptr::read(event_ptr.as_ptr() as *const E) })
+    }
+
+    pub(crate) fn send_inner(&mut self, item: EventQueueItem) -> Option<NonNull<u8>> {
+        // TODO: Cleanup this code, because EventDropper isn't really necessary now
         struct EventDropper<'a> {
             event: NonNull<u8>,
             drop: DropFn,
@@ -196,8 +243,7 @@ impl World {
 
                 let Some(location) = ctx.world.entities.get(target) else {
                     // Entity doesn't exist. Skip the event.
-                    unsafe { ctx.drop_event() };
-                    return;
+                    return Some(ctx.unpack().0);
                 };
 
                 let arch = unsafe {
@@ -229,16 +275,14 @@ impl World {
             // Did the handler take ownership of the event?
             if ctx.ownership_flag {
                 // Don't drop event since we don't own it anymore.
-                ctx.unpack();
-
-                return;
+                return Some(ctx.unpack().0);
             }
         }
 
         match unsafe { &*event_kind } {
             EventKind::Normal => {
-                // Ordinary event. Run drop fn.
-                unsafe { ctx.drop_event() };
+                // Ordinary event
+                return Some(ctx.unpack().0);
             }
             EventKind::Insert(InsertedComponentsInfo {
                 component_indices,
@@ -399,6 +443,7 @@ impl World {
         }
 
         self.bump.reset();
+        None
     }
 
     /// Broadcast a targeted event to all handlers in this world.
@@ -835,7 +880,7 @@ impl World {
     /// # #[derive(GlobalEvent)]
     /// # struct MyEvent;
     ///
-    /// fn my_handler(_: Receiver<MyEvent>) {};
+    /// fn my_handler(_: Receiver<MyEvent>) {}
     ///
     /// let mut world = World::new();
     /// let id = world.add_handler(my_handler);
