@@ -1292,6 +1292,35 @@ impl World {
         Some(unsafe { core::ptr::read(event_ptr.as_ptr() as *const E) })
     }
 
+    /// Broadcast a targeted event to all handlers in this world.
+    ///
+    /// Any events sent by handlers will also broadcast. This process continues
+    /// recursively until all events have finished broadcasting.
+    ///
+    /// See also [`World::send`] to send a [`GlobalEvent`].
+    ///
+    /// # Safety
+    ///
+    /// You CANNOT use this function in handlers!
+    ///
+    /// # Returns
+    ///
+    /// - `Some(E)` - final, modified event by all handlers
+    /// - `None` if the event was consumed by at least one handler.
+    pub fn send_to_with_response<E: TargetedEvent>(&mut self, target: EntityId, event: E) -> Option<E> {
+        let idx = self.add_targeted_event::<E>().index();
+
+        let event_ptr = self.send_inner(EventQueueItem {
+            meta: EventMeta::Targeted { target, idx },
+            event: NonNull::from(self.bump.alloc(event)).cast(),
+        })?;
+
+        self.flush_event_queue();
+
+        Some(unsafe { core::ptr::read(event_ptr.as_ptr() as *const E) })
+    }
+
+
     pub(crate) fn send_inner(&mut self, item: EventQueueItem) -> Option<NonNull<u8>> {
         struct EventDropper<'a> {
             event: NonNull<u8>,
